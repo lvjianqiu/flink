@@ -94,18 +94,15 @@ public class FsCheckpointStreamFactory implements CheckpointStreamFactory {
 				MAX_FILE_STATE_THRESHOLD);
 		}
 		this.fileStateThreshold = fileStateSizeThreshold;
-		Path basePath = checkpointDataUri;
 
-		Path dir = new Path(basePath, jobId.toString());
+		Path basePath = checkpointDataUri;
+		filesystem = basePath.getFileSystem();
+
+		checkpointDirectory = createBasePath(filesystem, basePath, jobId);
 
 		if (LOG.isDebugEnabled()) {
-			LOG.debug("Initializing file stream factory to URI {}.", dir);
+			LOG.debug("Initialed file stream factory to URI {}.", checkpointDirectory);
 		}
-
-		filesystem = basePath.getFileSystem();
-		filesystem.mkdirs(dir);
-
-		checkpointDirectory = dir;
 	}
 
 	@Override
@@ -115,7 +112,7 @@ public class FsCheckpointStreamFactory implements CheckpointStreamFactory {
 	public FsCheckpointStateOutputStream createCheckpointStateOutputStream(long checkpointID, long timestamp) throws Exception {
 		checkFileSystemInitialized();
 
-		Path checkpointDir = createCheckpointDirPath(checkpointID);
+		Path checkpointDir = createCheckpointDirPath(checkpointDirectory, checkpointID);
 		int bufferSize = Math.max(DEFAULT_WRITE_BUFFER_SIZE, fileStateThreshold);
 		return new FsCheckpointStateOutputStream(checkpointDir, filesystem, bufferSize, fileStateThreshold);
 	}
@@ -130,7 +127,13 @@ public class FsCheckpointStreamFactory implements CheckpointStreamFactory {
 		}
 	}
 
-	private Path createCheckpointDirPath(long checkpointID) {
+	protected Path createBasePath(FileSystem fs, Path checkpointDirectory, JobID jobID) throws IOException {
+		Path dir = new Path(checkpointDirectory, jobID.toString());
+		fs.mkdirs(dir);
+		return dir;
+	}
+
+	protected Path createCheckpointDirPath(Path checkpointDirectory, long checkpointID) {
 		return new Path(checkpointDirectory, "chk-" + checkpointID);
 	}
 
@@ -266,16 +269,20 @@ public class FsCheckpointStreamFactory implements CheckpointStreamFactory {
 				if (outStream != null) {
 					try {
 						outStream.close();
-						fs.delete(statePath, false);
-
+					} catch (Throwable throwable) {
+						LOG.warn("Could not close the state stream for {}.", statePath, throwable);
+					} finally {
 						try {
-							FileUtils.deletePathIfEmpty(fs, basePath);
-						} catch (Exception ignored) {
-							LOG.debug("Could not delete the parent directory {}.", basePath, ignored);
+							fs.delete(statePath, false);
+
+							try {
+								FileUtils.deletePathIfEmpty(fs, basePath);
+							} catch (Exception ignored) {
+								LOG.debug("Could not delete the parent directory {}.", basePath, ignored);
+							}
+						} catch (Exception e) {
+							LOG.warn("Cannot delete closed and discarded state stream for {}.", statePath, e);
 						}
-					}
-					catch (Exception e) {
-						LOG.warn("Cannot delete closed and discarded state stream for " + statePath, e);
 					}
 				}
 			}
@@ -297,20 +304,41 @@ public class FsCheckpointStreamFactory implements CheckpointStreamFactory {
 						return new ByteStreamStateHandle(createStatePath().toString(), bytes);
 					}
 					else {
-						flush();
-
-						closed = true;
-						pos = writeBuffer.length;
-
-						long size = -1;
-						// make a best effort attempt to figure out the size
 						try {
-							size = outStream.getPos();
-						} catch (Exception ignored) {}
+							flush();
 
-						outStream.close();
+							pos = writeBuffer.length;
+						
+							long size = -1L;
 
-						return new FileStateHandle(statePath, size);
+							// make a best effort attempt to figure out the size
+							try {
+								size = outStream.getPos();
+							} catch (Exception ignored) {}
+
+							outStream.close();
+
+							return new FileStateHandle(statePath, size);
+						} catch (Exception exception) {
+							try {
+								fs.delete(statePath, false);
+
+								try {
+									FileUtils.deletePathIfEmpty(fs, basePath);
+								} catch (Exception parentDirDeletionFailure) {
+									LOG.debug("Could not delete the parent directory {}.", basePath, parentDirDeletionFailure);
+								}
+							} catch (Exception deleteException) {
+								LOG.warn("Could not delete the checkpoint stream file {}.",
+									statePath, deleteException);
+							}
+
+							throw new IOException("Could not flush and close the file system " +
+								"output stream to " + statePath + " in order to obtain the " +
+								"stream state handle", exception);
+						} finally {
+							closed = true;
+						}
 					}
 				}
 				else {

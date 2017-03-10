@@ -78,7 +78,7 @@ public class ClusteringCoefficient {
 			.appendln(WordUtils.wrap("This algorithm returns tuples containing the vertex ID, the degree of" +
 				" the vertex, and the number of edges between vertex neighbors.", 80))
 			.appendNewLine()
-			.appendln("usage: ClusteringCoefficient --directed <true | false> --input <csv | rmat [options]> --output <print | hash | csv [options]>")
+			.appendln("usage: ClusteringCoefficient --directed <true | false> --input <csv | rmat> --output <print | hash | csv>")
 			.appendNewLine()
 			.appendln("options:")
 			.appendln("  --input csv --type <integer | string> [--simplify <true | false>] --input_filename FILENAME [--input_line_delimiter LINE_DELIMITER] [--input_field_delimiter FIELD_DELIMITER]")
@@ -306,13 +306,13 @@ public class ClusteringCoefficient {
 					for (Object e: lcc.collect()) {
 						org.apache.flink.graph.library.clustering.directed.LocalClusteringCoefficient.Result result =
 							(org.apache.flink.graph.library.clustering.directed.LocalClusteringCoefficient.Result)e;
-						System.out.println(result.toVerboseString());
+						System.out.println(result.toPrintableString());
 					}
 				} else {
 					for (Object e: lcc.collect()) {
 						org.apache.flink.graph.library.clustering.undirected.LocalClusteringCoefficient.Result result =
 							(org.apache.flink.graph.library.clustering.undirected.LocalClusteringCoefficient.Result)e;
-						System.out.println(result.toVerboseString());
+						System.out.println(result.toPrintableString());
 					}
 				}
 				break;

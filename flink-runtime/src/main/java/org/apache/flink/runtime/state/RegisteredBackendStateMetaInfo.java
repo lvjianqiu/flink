@@ -20,7 +20,9 @@ package org.apache.flink.runtime.state;
 
 import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
-import org.apache.flink.util.Preconditions;
+import org.apache.flink.migration.MigrationNamespaceSerializerProxy;
+
+import static org.apache.flink.util.Preconditions.checkNotNull;
 
 /**
  * Compound meta information for a registered state in a keyed state backend. This combines all serializers and the
@@ -37,10 +39,11 @@ public class RegisteredBackendStateMetaInfo<N, S> {
 	private final TypeSerializer<S> stateSerializer;
 
 	public RegisteredBackendStateMetaInfo(KeyedBackendSerializationProxy.StateMetaInfo<N, S> metaInfoProxy) {
-		this.stateType = metaInfoProxy.getStateType();
-		this.name = metaInfoProxy.getStateName();
-		this.namespaceSerializer = metaInfoProxy.getNamespaceSerializerSerializationProxy().getTypeSerializer();
-		this.stateSerializer = metaInfoProxy.getStateSerializerSerializationProxy().getTypeSerializer();
+		this(
+				metaInfoProxy.getStateType(),
+				metaInfoProxy.getStateName(),
+				metaInfoProxy.getNamespaceSerializerSerializationProxy().getTypeSerializer(),
+				metaInfoProxy.getStateSerializerSerializationProxy().getTypeSerializer());
 	}
 
 	public RegisteredBackendStateMetaInfo(
@@ -49,10 +52,10 @@ public class RegisteredBackendStateMetaInfo<N, S> {
 			TypeSerializer<N> namespaceSerializer,
 			TypeSerializer<S> stateSerializer) {
 
-		this.stateType = Preconditions.checkNotNull(stateType);
-		this.name = Preconditions.checkNotNull(name);
-		this.namespaceSerializer = namespaceSerializer;
-		this.stateSerializer = stateSerializer;
+		this.stateType = checkNotNull(stateType);
+		this.name = checkNotNull(name);
+		this.namespaceSerializer = checkNotNull(namespaceSerializer);
+		this.stateSerializer = checkNotNull(stateSerializer);
 	}
 
 	public StateDescriptor.Type getStateType() {
@@ -91,8 +94,10 @@ public class RegisteredBackendStateMetaInfo<N, S> {
 			return false;
 		}
 
-		return namespaceSerializer.isCompatibleWith(other.namespaceSerializer)
-				&& stateSerializer.isCompatibleWith(other.stateSerializer);
+		return (stateSerializer.isCompatibleWith(other.stateSerializer)) &&
+				(namespaceSerializer.isCompatibleWith(other.namespaceSerializer)
+						// we also check if there is just a migration proxy that should be replaced by any real serializer
+						|| other.namespaceSerializer instanceof MigrationNamespaceSerializerProxy);
 	}
 
 	@Override
@@ -115,10 +120,18 @@ public class RegisteredBackendStateMetaInfo<N, S> {
 			return false;
 		}
 
-		if (getNamespaceSerializer() != null ? !getNamespaceSerializer().equals(that.getNamespaceSerializer()) : that.getNamespaceSerializer() != null) {
-			return false;
-		}
-		return getStateSerializer() != null ? getStateSerializer().equals(that.getStateSerializer()) : that.getStateSerializer() == null;
+		return getStateSerializer().equals(that.getStateSerializer())
+				&& getNamespaceSerializer().equals(that.getNamespaceSerializer());
+	}
+
+	@Override
+	public String toString() {
+		return "RegisteredBackendStateMetaInfo{" +
+				"stateType=" + stateType +
+				", name='" + name + '\'' +
+				", namespaceSerializer=" + namespaceSerializer +
+				", stateSerializer=" + stateSerializer +
+				'}';
 	}
 
 	@Override

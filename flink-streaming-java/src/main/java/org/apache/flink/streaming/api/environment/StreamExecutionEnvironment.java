@@ -31,6 +31,7 @@ import org.apache.flink.api.common.io.FilePathFilter;
 import org.apache.flink.api.common.io.InputFormat;
 import org.apache.flink.api.common.restartstrategy.RestartStrategies;
 import org.apache.flink.api.common.state.ValueState;
+import org.apache.flink.api.common.time.Time;
 import org.apache.flink.api.common.typeinfo.BasicTypeInfo;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.java.ClosureCleaner;
@@ -44,9 +45,11 @@ import org.apache.flink.api.java.typeutils.TypeExtractor;
 import org.apache.flink.client.program.ContextEnvironment;
 import org.apache.flink.client.program.OptimizerPlanEnvironment;
 import org.apache.flink.client.program.PreviewPlanEnvironment;
+import org.apache.flink.configuration.ConfigConstants;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.runtime.state.AbstractStateBackend;
+import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
 import org.apache.flink.streaming.api.CheckpointingMode;
 import org.apache.flink.streaming.api.TimeCharacteristic;
 import org.apache.flink.streaming.api.datastream.DataStream;
@@ -80,6 +83,8 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
+
+import static org.apache.flink.util.Preconditions.checkNotNull;
 
 /**
  * The StreamExecutionEnvironment is the context in which a streaming program is executed. A
@@ -163,16 +168,19 @@ public abstract class StreamExecutionEnvironment {
 	}
 
 	/**
-	 * Sets the maximum degree of parallelism defined for the program.
+	 * Sets the maximum degree of parallelism defined for the program. The upper limit (inclusive) is Short.MAX_VALUE.
 	 *
 	 * The maximum degree of parallelism specifies the upper limit for dynamic scaling. It also
 	 * defines the number of key groups used for partitioned state.
 	 *
-	 * @param maxParallelism Maximum degree of parallelism to be used for the program., with 0 < maxParallelism <= 2^15
+	 * @param maxParallelism Maximum degree of parallelism to be used for the program., with 0 < maxParallelism <= 2^15 - 1
 	 */
 	public StreamExecutionEnvironment setMaxParallelism(int maxParallelism) {
-		Preconditions.checkArgument(maxParallelism > 0 && maxParallelism <= (1 << 15),
-				"maxParallelism is out of bounds 0 < maxParallelism <= 2^15. Found: " + maxParallelism);
+		Preconditions.checkArgument(maxParallelism > 0 &&
+						maxParallelism <= KeyGroupRangeAssignment.UPPER_BOUND_MAX_PARALLELISM,
+				"maxParallelism is out of bounds 0 < maxParallelism <= " +
+						KeyGroupRangeAssignment.UPPER_BOUND_MAX_PARALLELISM + ". Found: " + maxParallelism);
+
 		config.setMaxParallelism(maxParallelism);
 		return this;
 	}
@@ -477,7 +485,7 @@ public abstract class StreamExecutionEnvironment {
 	 * 		The number of times the system will try to re-execute failed tasks.
 	 *
 	 * @deprecated This method will be replaced by {@link #setRestartStrategy}. The
-	 * {@link RestartStrategies.FixedDelayRestartStrategyConfiguration} contains the number of
+	 * {@link RestartStrategies#fixedDelayRestart(int, Time)} contains the number of
 	 * execution retries.
 	 */
 	@Deprecated
@@ -493,26 +501,12 @@ public abstract class StreamExecutionEnvironment {
 	 *
 	 * @return The number of times the system will try to re-execute failed tasks.
 	 *
-	 * @deprecated This method will be replaced by {@link #getRestartStrategy}. The
-	 * {@link RestartStrategies.FixedDelayRestartStrategyConfiguration} contains the number of
-	 * execution retries.
+	 * @deprecated This method will be replaced by {@link #getRestartStrategy}.
 	 */
 	@Deprecated
 	@PublicEvolving
 	public int getNumberOfExecutionRetries() {
 		return config.getNumberOfExecutionRetries();
-	}
-
-	/**
-	 * Sets the default parallelism that will be used for the local execution
-	 * environment created by {@link #createLocalEnvironment()}.
-	 *
-	 * @param parallelism
-	 * 		The parallelism to use as the default local parallelism.
-	 */
-	@PublicEvolving
-	public static void setDefaultLocalParallelism(int parallelism) {
-		defaultLocalParallelism = parallelism;
 	}
 
 	// --------------------------------------------------------------------------------------------
@@ -1645,6 +1639,33 @@ public abstract class StreamExecutionEnvironment {
 	}
 
 	/**
+	 * Creates a {@link LocalStreamEnvironment} for local program execution that also starts the
+	 * web monitoring UI.
+	 * 
+	 * <p>The local execution environment will run the program in a multi-threaded fashion in
+	 * the same JVM as the environment was created in. It will use the parallelism specified in the
+	 * parameter.
+	 * 
+	 * <p>If the configuration key 'jobmanager.web.port' was set in the configuration, that particular
+	 * port will be used for the web UI. Otherwise, the default port (8081) will be used.
+	 */
+	@PublicEvolving
+	public static StreamExecutionEnvironment createLocalEnvironmentWithWebUI(Configuration conf) {
+		checkNotNull(conf, "conf");
+
+		if (!conf.containsKey(ConfigConstants.JOB_MANAGER_WEB_PORT_KEY)) {
+			int port = ConfigConstants.DEFAULT_JOB_MANAGER_WEB_FRONTEND_PORT;
+			conf.setInteger(ConfigConstants.JOB_MANAGER_WEB_PORT_KEY, port);
+		}
+		conf.setBoolean(ConfigConstants.LOCAL_START_WEBSERVER, true);
+
+		LocalStreamEnvironment localEnv = new LocalStreamEnvironment(conf);
+		localEnv.setParallelism(defaultLocalParallelism);
+
+		return localEnv;
+	}
+
+	/**
 	 * Creates a {@link RemoteStreamEnvironment}. The remote environment sends
 	 * (parts of) the program to a cluster for execution. Note that all file
 	 * paths used in the program must be accessible from the cluster. The
@@ -1724,7 +1745,29 @@ public abstract class StreamExecutionEnvironment {
 	{
 		return new RemoteStreamEnvironment(host, port, clientConfig, jarFiles);
 	}
-	
+
+	/**
+	 * Gets the default parallelism that will be used for the local execution environment created by
+	 * {@link #createLocalEnvironment()}.
+	 *
+	 * @return The default local parallelism
+	 */
+	@PublicEvolving
+	public static int getDefaultLocalParallelism() {
+		return defaultLocalParallelism;
+	}
+
+	/**
+	 * Sets the default parallelism that will be used for the local execution
+	 * environment created by {@link #createLocalEnvironment()}.
+	 *
+	 * @param parallelism The parallelism to use as the default local parallelism.
+	 */
+	@PublicEvolving
+	public static void setDefaultLocalParallelism(int parallelism) {
+		defaultLocalParallelism = parallelism;
+	}
+
 	// --------------------------------------------------------------------------------------------
 	//  Methods to control the context and local environments for execution from packaged programs
 	// --------------------------------------------------------------------------------------------

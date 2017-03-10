@@ -20,7 +20,9 @@ package org.apache.flink.streaming.connectors.fs;
 
 import org.apache.flink.configuration.ConfigConstants;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.CoreOptions;
 import org.apache.flink.configuration.HighAvailabilityOptions;
+import org.apache.flink.configuration.SecurityOptions;
 import org.apache.flink.runtime.security.SecurityUtils;
 import org.apache.flink.streaming.util.TestStreamEnvironment;
 import org.apache.flink.test.util.SecureTestEnvironment;
@@ -116,13 +118,12 @@ public class RollingSinkSecuredITCase extends RollingSinkITCase {
 		populateSecureConfigurations();
 
 		Configuration flinkConfig = new Configuration();
-		flinkConfig.setString(ConfigConstants.SECURITY_KEYTAB_KEY,
+		flinkConfig.setString(SecurityOptions.KERBEROS_LOGIN_KEYTAB,
 				SecureTestEnvironment.getTestKeytab());
-		flinkConfig.setString(ConfigConstants.SECURITY_PRINCIPAL_KEY,
+		flinkConfig.setString(SecurityOptions.KERBEROS_LOGIN_PRINCIPAL,
 				SecureTestEnvironment.getHadoopServicePrincipal());
 
-		SecurityUtils.SecurityConfiguration ctx = new SecurityUtils.SecurityConfiguration(flinkConfig);
-		ctx.setHadoopConfiguration(conf);
+		SecurityUtils.SecurityConfiguration ctx = new SecurityUtils.SecurityConfiguration(flinkConfig, conf);
 		try {
 			TestingSecurityContext.install(ctx, SecureTestEnvironment.getClientSecurityConfigurationMap());
 		} catch (Exception e) {
@@ -216,7 +217,7 @@ public class RollingSinkSecuredITCase extends RollingSinkITCase {
 			config.setBoolean(ConfigConstants.LOCAL_START_WEBSERVER, false);
 			config.setInteger(ConfigConstants.LOCAL_NUMBER_JOB_MANAGER, 3);
 			config.setString(HighAvailabilityOptions.HA_MODE, "zookeeper");
-			config.setString(ConfigConstants.STATE_BACKEND, "filesystem");
+			config.setString(CoreOptions.STATE_BACKEND, "filesystem");
 			config.setString(ConfigConstants.ZOOKEEPER_CHECKPOINTS_PATH, hdfsURI + "/flink/checkpoints");
 			config.setString(HighAvailabilityOptions.HA_STORAGE_PATH, hdfsURI + "/flink/recovery");
 			config.setString("state.backend.fs.checkpointdir", hdfsURI + "/flink/checkpoints");

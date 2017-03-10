@@ -27,7 +27,6 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.metrics.groups.UnregisteredMetricsGroup;
 import org.apache.flink.runtime.akka.AkkaUtils;
 import org.apache.flink.runtime.blob.BlobKey;
-import org.apache.flink.runtime.checkpoint.stats.DisabledCheckpointStatsTracker;
 import org.apache.flink.runtime.executiongraph.ExecutionGraph;
 import org.apache.flink.runtime.executiongraph.ExecutionJobVertex;
 import org.apache.flink.runtime.executiongraph.restart.NoRestartStrategy;
@@ -35,16 +34,15 @@ import org.apache.flink.runtime.jobgraph.JobStatus;
 import org.apache.flink.runtime.jobgraph.JobVertex;
 import org.apache.flink.runtime.jobgraph.tasks.AbstractInvokable;
 import org.apache.flink.runtime.jobgraph.tasks.ExternalizedCheckpointSettings;
+import org.apache.flink.runtime.jobmanager.scheduler.Scheduler;
 import org.apache.flink.runtime.testingUtils.TestingUtils;
 import org.apache.flink.util.SerializedValue;
 import org.junit.AfterClass;
 import org.junit.Test;
 import org.mockito.Matchers;
-import scala.concurrent.duration.FiniteDuration;
 
 import java.net.URL;
 import java.util.Collections;
-import java.util.concurrent.TimeUnit;
 
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -96,8 +94,8 @@ public class ExecutionGraphCheckpointCoordinatorTest {
 			CheckpointIDCounter counter,
 			CompletedCheckpointStore store) throws Exception {
 		ExecutionGraph executionGraph = new ExecutionGraph(
-			TestingUtils.defaultExecutionContext(),
-			TestingUtils.defaultExecutionContext(),
+			TestingUtils.defaultExecutor(),
+			TestingUtils.defaultExecutor(),
 			new JobID(),
 			"test",
 			new Configuration(),
@@ -106,10 +104,11 @@ public class ExecutionGraphCheckpointCoordinatorTest {
 			new NoRestartStrategy(),
 			Collections.<BlobKey>emptyList(),
 			Collections.<URL>emptyList(),
+			new Scheduler(TestingUtils.defaultExecutionContext()),
 			ClassLoader.getSystemClassLoader(),
 			new UnregisteredMetricsGroup());
 
-		executionGraph.enableSnapshotCheckpointing(
+		executionGraph.enableCheckpointing(
 				100,
 				100,
 				100,
@@ -121,7 +120,8 @@ public class ExecutionGraphCheckpointCoordinatorTest {
 				counter,
 				store,
 				null,
-				new DisabledCheckpointStatsTracker());
+				null,
+				CheckpointStatsTrackerTest.createTestTracker());
 
 		JobVertex jobVertex = new JobVertex("MockVertex");
 		jobVertex.setInvokableClass(AbstractInvokable.class);

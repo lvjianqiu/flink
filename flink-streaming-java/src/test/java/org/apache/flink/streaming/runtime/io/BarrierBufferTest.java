@@ -20,9 +20,11 @@ package org.apache.flink.streaming.runtime.io;
 
 import org.apache.flink.core.memory.MemorySegment;
 import org.apache.flink.core.memory.MemorySegmentFactory;
+import org.apache.flink.runtime.checkpoint.CheckpointMetaData;
+import org.apache.flink.runtime.checkpoint.CheckpointMetrics;
+import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.checkpoint.decline.CheckpointDeclineOnCancellationBarrierException;
 import org.apache.flink.runtime.checkpoint.decline.CheckpointDeclineSubsumedException;
-import org.apache.flink.runtime.checkpoint.CheckpointMetaData;
 import org.apache.flink.runtime.io.disk.iomanager.IOManager;
 import org.apache.flink.runtime.io.disk.iomanager.IOManagerAsync;
 import org.apache.flink.runtime.io.network.api.CancelCheckpointMarker;
@@ -33,10 +35,8 @@ import org.apache.flink.runtime.io.network.buffer.FreeingBufferRecycler;
 import org.apache.flink.runtime.io.network.partition.consumer.BufferOrEvent;
 import org.apache.flink.runtime.jobgraph.tasks.StatefulTask;
 import org.apache.flink.runtime.state.TaskStateHandles;
-
 import org.hamcrest.BaseMatcher;
 import org.hamcrest.Description;
-
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -50,7 +50,6 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
-
 import static org.mockito.Matchers.any;
 import static org.mockito.Matchers.anyLong;
 import static org.mockito.Matchers.argThat;
@@ -262,6 +261,7 @@ public class BarrierBufferTest {
 			check(sequence[5], buffer.getNextNonBlocked());
 			assertEquals(2L, handler.getNextExpectedCheckpointId());
 			validateAlignmentTime(startTs, buffer);
+			validateAlignmentBuffered(handler.getLastReportedBytesBufferedInAlignment(), sequence[5], sequence[6]);
 
 			check(sequence[6], buffer.getNextNonBlocked());
 
@@ -278,11 +278,13 @@ public class BarrierBufferTest {
 			check(sequence[17], buffer.getNextNonBlocked());
 			assertEquals(3L, handler.getNextExpectedCheckpointId());
 			validateAlignmentTime(startTs, buffer);
+			validateAlignmentBuffered(handler.getLastReportedBytesBufferedInAlignment());
 
 			check(sequence[18], buffer.getNextNonBlocked());
 
 			// checkpoint 3 starts, data buffered
 			check(sequence[20], buffer.getNextNonBlocked());
+			validateAlignmentBuffered(handler.getLastReportedBytesBufferedInAlignment(), sequence[20], sequence[21]);
 			assertEquals(4L, handler.getNextExpectedCheckpointId());
 			check(sequence[21], buffer.getNextNonBlocked());
 
@@ -290,7 +292,10 @@ public class BarrierBufferTest {
 
 			// pre checkpoint 5
 			check(sequence[27], buffer.getNextNonBlocked());
+
+			validateAlignmentBuffered(handler.getLastReportedBytesBufferedInAlignment());
 			assertEquals(5L, handler.getNextExpectedCheckpointId());
+
 			check(sequence[28], buffer.getNextNonBlocked());
 			check(sequence[29], buffer.getNextNonBlocked());
 			
@@ -311,9 +316,12 @@ public class BarrierBufferTest {
 			check(sequence[42], buffer.getNextNonBlocked());
 			check(sequence[43], buffer.getNextNonBlocked());
 			check(sequence[44], buffer.getNextNonBlocked());
-			
+
 			assertNull(buffer.getNextNonBlocked());
 			assertNull(buffer.getNextNonBlocked());
+
+			validateAlignmentBuffered(handler.getLastReportedBytesBufferedInAlignment(),
+				sequence[34], sequence[36], sequence[38], sequence[39]);
 
 			buffer.cleanup();
 
@@ -559,7 +567,7 @@ public class BarrierBufferTest {
 			// checkpoint done - replay buffered
 			check(sequence[5], buffer.getNextNonBlocked());
 			validateAlignmentTime(startTs, buffer);
-			verify(toNotify).triggerCheckpointOnBarrier(argThat(new CheckpointMatcher(1L)));
+			verify(toNotify).triggerCheckpointOnBarrier(argThat(new CheckpointMatcher(1L)), any(CheckpointOptions.class), any(CheckpointMetrics.class));
 			check(sequence[6], buffer.getNextNonBlocked());
 
 			check(sequence[9], buffer.getNextNonBlocked());
@@ -1001,14 +1009,14 @@ public class BarrierBufferTest {
 
 		check(sequence[0], buffer.getNextNonBlocked());
 		check(sequence[2], buffer.getNextNonBlocked());
-		verify(toNotify, times(1)).triggerCheckpointOnBarrier(argThat(new CheckpointMatcher(1L)));
+		verify(toNotify, times(1)).triggerCheckpointOnBarrier(argThat(new CheckpointMatcher(1L)), any(CheckpointOptions.class), any(CheckpointMetrics.class));
 		assertEquals(0L, buffer.getAlignmentDurationNanos());
 
 		check(sequence[6], buffer.getNextNonBlocked());
 		assertEquals(5L, buffer.getCurrentCheckpointId());
-		verify(toNotify, times(1)).triggerCheckpointOnBarrier(argThat(new CheckpointMatcher(2L)));
+		verify(toNotify, times(1)).triggerCheckpointOnBarrier(argThat(new CheckpointMatcher(2L)), any(CheckpointOptions.class), any(CheckpointMetrics.class));
 		verify(toNotify, times(1)).abortCheckpointOnBarrier(eq(4L), any(CheckpointDeclineOnCancellationBarrierException.class));
-		verify(toNotify, times(1)).triggerCheckpointOnBarrier(argThat(new CheckpointMatcher(5L)));
+		verify(toNotify, times(1)).triggerCheckpointOnBarrier(argThat(new CheckpointMatcher(5L)), any(CheckpointOptions.class), any(CheckpointMetrics.class));
 		assertEquals(0L, buffer.getAlignmentDurationNanos());
 
 		check(sequence[8], buffer.getNextNonBlocked());
@@ -1071,7 +1079,7 @@ public class BarrierBufferTest {
 		check(sequence[2], buffer.getNextNonBlocked());
 		startTs = System.nanoTime();
 		check(sequence[5], buffer.getNextNonBlocked());
-		verify(toNotify, times(1)).triggerCheckpointOnBarrier(argThat(new CheckpointMatcher(1L)));
+		verify(toNotify, times(1)).triggerCheckpointOnBarrier(argThat(new CheckpointMatcher(1L)), any(CheckpointOptions.class), any(CheckpointMetrics.class));
 		validateAlignmentTime(startTs, buffer);
 
 		check(sequence[6], buffer.getNextNonBlocked());
@@ -1090,7 +1098,7 @@ public class BarrierBufferTest {
 		check(sequence[16], buffer.getNextNonBlocked());
 		startTs = System.nanoTime();
 		check(sequence[20], buffer.getNextNonBlocked());
-		verify(toNotify, times(1)).triggerCheckpointOnBarrier(argThat(new CheckpointMatcher(3L)));
+		verify(toNotify, times(1)).triggerCheckpointOnBarrier(argThat(new CheckpointMatcher(3L)), any(CheckpointOptions.class), any(CheckpointMetrics.class));
 		validateAlignmentTime(startTs, buffer);
 		check(sequence[21], buffer.getNextNonBlocked());
 
@@ -1107,7 +1115,7 @@ public class BarrierBufferTest {
 		// a simple successful checkpoint
 		startTs = System.nanoTime();
 		check(sequence[32], buffer.getNextNonBlocked());
-		verify(toNotify, times(1)).triggerCheckpointOnBarrier(argThat(new CheckpointMatcher(5L)));
+		verify(toNotify, times(1)).triggerCheckpointOnBarrier(argThat(new CheckpointMatcher(5L)), any(CheckpointOptions.class), any(CheckpointMetrics.class));
 		validateAlignmentTime(startTs, buffer);
 		check(sequence[33], buffer.getNextNonBlocked());
 
@@ -1168,7 +1176,7 @@ public class BarrierBufferTest {
 
 		// finished first checkpoint
 		check(sequence[3], buffer.getNextNonBlocked());
-		verify(toNotify, times(1)).triggerCheckpointOnBarrier(argThat(new CheckpointMatcher(1L)));
+		verify(toNotify, times(1)).triggerCheckpointOnBarrier(argThat(new CheckpointMatcher(1L)), any(CheckpointOptions.class), any(CheckpointMetrics.class));
 		validateAlignmentTime(startTs, buffer);
 
 		check(sequence[5], buffer.getNextNonBlocked());
@@ -1191,7 +1199,7 @@ public class BarrierBufferTest {
 		assertEquals(0L, buffer.getAlignmentDurationNanos());
 
 		// no further checkpoint (abort) notifications
-		verify(toNotify, times(1)).triggerCheckpointOnBarrier(any(CheckpointMetaData.class));
+		verify(toNotify, times(1)).triggerCheckpointOnBarrier(any(CheckpointMetaData.class), any(CheckpointOptions.class), any(CheckpointMetrics.class));
 		verify(toNotify, times(1)).abortCheckpointOnBarrier(anyLong(), any(CheckpointDeclineOnCancellationBarrierException.class));
 
 		// all done
@@ -1273,7 +1281,7 @@ public class BarrierBufferTest {
 		// checkpoint done
 		check(sequence[7], buffer.getNextNonBlocked());
 		validateAlignmentTime(startTs, buffer);
-		verify(toNotify).triggerCheckpointOnBarrier(argThat(new CheckpointMatcher(2L)));
+		verify(toNotify).triggerCheckpointOnBarrier(argThat(new CheckpointMatcher(2L)), any(CheckpointOptions.class), any(CheckpointMetrics.class));
 
 		// queued data
 		check(sequence[10], buffer.getNextNonBlocked());
@@ -1292,7 +1300,7 @@ public class BarrierBufferTest {
 		checkNoTempFilesRemain();
 
 		// check overall notifications
-		verify(toNotify, times(1)).triggerCheckpointOnBarrier(any(CheckpointMetaData.class));
+		verify(toNotify, times(1)).triggerCheckpointOnBarrier(any(CheckpointMetaData.class), any(CheckpointOptions.class), any(CheckpointMetrics.class));
 		verify(toNotify, times(1)).abortCheckpointOnBarrier(anyLong(), any(Throwable.class));
 	}
 
@@ -1357,7 +1365,7 @@ public class BarrierBufferTest {
 		// checkpoint finished
 		check(sequence[7], buffer.getNextNonBlocked());
 		validateAlignmentTime(startTs, buffer);
-		verify(toNotify, times(1)).triggerCheckpointOnBarrier(argThat(new CheckpointMatcher(5L)));
+		verify(toNotify, times(1)).triggerCheckpointOnBarrier(argThat(new CheckpointMatcher(5L)), any(CheckpointOptions.class), any(CheckpointMetrics.class));
 		check(sequence[11], buffer.getNextNonBlocked());
 
 		// remaining data
@@ -1373,7 +1381,7 @@ public class BarrierBufferTest {
 		checkNoTempFilesRemain();
 
 		// check overall notifications
-		verify(toNotify, times(1)).triggerCheckpointOnBarrier(any(CheckpointMetaData.class));
+		verify(toNotify, times(1)).triggerCheckpointOnBarrier(any(CheckpointMetaData.class), any(CheckpointOptions.class), any(CheckpointMetrics.class));
 		verify(toNotify, times(1)).abortCheckpointOnBarrier(anyLong(), any(Throwable.class));
 	}
 
@@ -1382,7 +1390,7 @@ public class BarrierBufferTest {
 	// ------------------------------------------------------------------------
 
 	private static BufferOrEvent createBarrier(long checkpointId, int channel) {
-		return new BufferOrEvent(new CheckpointBarrier(checkpointId, System.currentTimeMillis()), channel);
+		return new BufferOrEvent(new CheckpointBarrier(checkpointId, System.currentTimeMillis(), CheckpointOptions.forFullCheckpoint()), channel);
 	}
 
 	private static BufferOrEvent createCancellationBarrier(long checkpointId, int channel) {
@@ -1442,13 +1450,25 @@ public class BarrierBufferTest {
 		assertTrue("wrong alignment time", buffer.getAlignmentDurationNanos() <= elapsed);
 	}
 
+	private static void validateAlignmentBuffered(long actualBytesBuffered, BufferOrEvent... sequence) {
+		long expectedBuffered = 0;
+		for (BufferOrEvent boe : sequence) {
+			if (boe.isBuffer()) {
+				expectedBuffered += BufferSpiller.HEADER_SIZE + boe.getBuffer().getSize();
+			}
+		}
+
+		assertEquals("Wrong alignment buffered bytes", actualBytesBuffered, expectedBuffered);
+	}
+
 	// ------------------------------------------------------------------------
 	//  Testing Mocks
 	// ------------------------------------------------------------------------
 
 	private static class ValidatingCheckpointHandler implements StatefulTask {
-		
+
 		private long nextExpectedCheckpointId = -1L;
+		private long lastReportedBytesBufferedInAlignment = -1;
 
 		public void setNextExpectedCheckpointId(long nextExpectedCheckpointId) {
 			this.nextExpectedCheckpointId = nextExpectedCheckpointId;
@@ -1458,27 +1478,32 @@ public class BarrierBufferTest {
 			return nextExpectedCheckpointId;
 		}
 
+		long getLastReportedBytesBufferedInAlignment() {
+			return lastReportedBytesBufferedInAlignment;
+		}
+
 		@Override
 		public void setInitialState(TaskStateHandles taskStateHandles) throws Exception {
 			throw new UnsupportedOperationException("should never be called");
 		}
 
 		@Override
-		public boolean triggerCheckpoint(CheckpointMetaData checkpointMetaData) throws Exception {
+		public boolean triggerCheckpoint(CheckpointMetaData checkpointMetaData, CheckpointOptions checkpointOptions) throws Exception {
 			throw new UnsupportedOperationException("should never be called");
 		}
 
 		@Override
-		public void triggerCheckpointOnBarrier(CheckpointMetaData checkpointMetaData) throws Exception {
+		public void triggerCheckpointOnBarrier(CheckpointMetaData checkpointMetaData, CheckpointOptions checkpointOptions, CheckpointMetrics checkpointMetrics) throws Exception {
 			assertTrue("wrong checkpoint id",
 					nextExpectedCheckpointId == -1L || 
 					nextExpectedCheckpointId == checkpointMetaData.getCheckpointId());
 
 			assertTrue(checkpointMetaData.getTimestamp() > 0);
-			assertTrue(checkpointMetaData.getBytesBufferedInAlignment() >= 0);
-			assertTrue(checkpointMetaData.getAlignmentDurationNanos() >= 0);
+			assertTrue(checkpointMetrics.getBytesBufferedInAlignment() >= 0);
+			assertTrue(checkpointMetrics.getAlignmentDurationNanos() >= 0);
 
 			nextExpectedCheckpointId++;
+			lastReportedBytesBufferedInAlignment = checkpointMetrics.getBytesBufferedInAlignment();
 		}
 
 		@Override

@@ -210,7 +210,7 @@ dataStream.filter(new FilterFunction<Integer>() {
           <td><strong>KeyBy</strong><br>DataStream &rarr; KeyedStream</td>
           <td>
             <p>Logically partitions a stream into disjoint partitions, each partition containing elements of the same key.
-            Internally, this is implemented with hash partitioning. See <a href="/dev/api_concepts#specifying-keys">keys</a> on how to specify keys.
+            Internally, this is implemented with hash partitioning. See <a href="{{ site.baseurl }}/dev/api_concepts.html#specifying-keys">keys</a> on how to specify keys.
             This transformation returns a KeyedDataStream.</p>
     {% highlight java %}
 dataStream.keyBy("someKey") // Key by field "someKey"
@@ -348,7 +348,7 @@ windowedStream.reduce (new ReduceFunction<Tuple2<String,Integer>>() {
     public Tuple2<String, Integer> reduce(Tuple2<String, Integer> value1, Tuple2<String, Integer> value2) throws Exception {
         return new Tuple2<String,Integer>(value1.f0, value1.f1 + value2.f1);
     }
-};
+});
     {% endhighlight %}
           </td>
         </tr>
@@ -363,7 +363,7 @@ windowedStream.fold("start", new FoldFunction<Integer, String>() {
     public String fold(String current, Integer value) {
         return current + "-" + value;
     }
-};
+});
     {% endhighlight %}
           </td>
         </tr>
@@ -597,7 +597,7 @@ dataStream.filter { _ != 0 }
           <td><strong>KeyBy</strong><br>DataStream &rarr; KeyedStream</td>
           <td>
             <p>Logically partitions a stream into disjoint partitions, each partition containing elements of the same key.
-            Internally, this is implemented with hash partitioning. See <a href="/dev/api_concepts#specifying-keys">keys</a> on how to specify keys.
+            Internally, this is implemented with hash partitioning. See <a href="{{ site.baseurl }}/dev/api_concepts.html#specifying-keys">keys</a> on how to specify keys.
             This transformation returns a KeyedDataStream.</p>
     {% highlight scala %}
 dataStream.keyBy("someKey") // Key by field "someKey"
@@ -874,7 +874,7 @@ data.map {
   case (id, name, temperature) => // [...]
 }
 {% endhighlight %}
-is not supported by the API out-of-the-box. To use this feature, you should use a <a href="./scala_api_extensions.html">Scala API extension</a>.
+is not supported by the API out-of-the-box. To use this feature, you should use a <a href="scala_api_extensions.html">Scala API extension</a>.
 
 
 </div>
@@ -903,34 +903,6 @@ The following transformations are available on data streams of Tuples:
 {% highlight java %}
 DataStream<Tuple3<Integer, Double, String>> in = // [...]
 DataStream<Tuple2<String, Integer>> out = in.project(2,0);
-{% endhighlight %}
-        </p>
-      </td>
-    </tr>
-  </tbody>
-</table>
-
-</div>
-
-<div data-lang="scala" markdown="1">
-
-<br />
-
-<table class="table table-bordered">
-  <thead>
-    <tr>
-      <th class="text-left" style="width: 20%">Transformation</th>
-      <th class="text-center">Description</th>
-    </tr>
-  </thead>
-  <tbody>
-   <tr>
-      <td><strong>Project</strong><br>DataStream &rarr; DataStream</td>
-      <td>
-        <p>Selects a subset of fields from the tuples
-{% highlight scala %}
-val in : DataStream[(Int,Double,String)] = // [...]
-val out = in.project(2,0)
 {% endhighlight %}
         </p>
       </td>
@@ -1610,7 +1582,7 @@ Execution Parameters
 
 The `StreamExecutionEnvironment` contains the `ExecutionConfig` which allows to set job specific configuration values for the runtime.
 
-Please refer to [execution configuration]({{ site.baseurl }}/dev/execution_configuration)
+Please refer to [execution configuration]({{ site.baseurl }}/dev/execution_configuration.html)
 for an explanation of most parameters. These parameters pertain specifically to the DataStream API:
 
 - `enableTimestamps()` / **`disableTimestamps()`**: Attach a timestamp to each event emitted from a source.
@@ -1623,7 +1595,7 @@ for an explanation of most parameters. These parameters pertain specifically to 
 
 ### Fault Tolerance
 
-The [Fault Tolerance Documentation]({{ site.baseurl }}/setup/fault_tolerance.html) describes the options and parameters to enable and configure Flink's checkpointing mechanism.
+[State & Checkpointing]({{ site.baseurl }}/dev/stream/checkpointing.html) describes how to enable and configure Flink's checkpointing mechanism.
 
 ### Controlling Latency
 

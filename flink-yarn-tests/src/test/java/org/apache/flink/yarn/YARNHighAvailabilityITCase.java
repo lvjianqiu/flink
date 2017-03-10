@@ -25,6 +25,7 @@ import org.apache.curator.test.TestingServer;
 import org.apache.flink.client.program.ClusterClient;
 import org.apache.flink.configuration.ConfigConstants;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.CoreOptions;
 import org.apache.flink.configuration.GlobalConfiguration;
 import org.apache.flink.configuration.HighAvailabilityOptions;
 import org.apache.flink.runtime.akka.AkkaUtils;
@@ -90,7 +91,7 @@ public class YARNHighAvailabilityITCase extends YarnTestBase {
 
 	/**
 	 * Tests that the application master can be killed multiple times and that the surviving
-	 * TaskManager succesfully reconnects to the newly started JobManager.
+	 * TaskManager successfully reconnects to the newly started JobManager.
 	 * @throws Exception
 	 */
 	@Test
@@ -118,7 +119,7 @@ public class YARNHighAvailabilityITCase extends YarnTestBase {
 		flinkYarnClient.setFlinkConfiguration(GlobalConfiguration.loadConfiguration());
 		flinkYarnClient.setDynamicPropertiesEncoded("recovery.mode=zookeeper@@recovery.zookeeper.quorum=" +
 			zkServer.getConnectString() + "@@yarn.application-attempts=" + numberApplicationAttempts +
-			"@@" + ConfigConstants.STATE_BACKEND + "=FILESYSTEM" +
+			"@@" + CoreOptions.STATE_BACKEND + "=FILESYSTEM" +
 			"@@" + FsStateBackendFactory.CHECKPOINT_DIRECTORY_URI_CONF_KEY + "=" + fsStateHandlePath + "/checkpoints" +
 			"@@" + HighAvailabilityOptions.HA_STORAGE_PATH.key() + "=" + fsStateHandlePath + "/recovery");
 		flinkYarnClient.setConfigurationFilePath(new Path(confDirPath + File.separator + "flink-conf.yaml"));

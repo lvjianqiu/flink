@@ -54,6 +54,12 @@ angular.module('flinkApp')
     else
       if short then return days + "d " + hours + "h" else return days + "d " + hours + "h " + minutes + "m " + seconds + "s"
 
+.filter "limit", ->
+  (text) ->
+    if (text.length > 73)
+      text = text.substring(0, 35) + "..." + text.substring(text.length - 35, text.length)
+    text
+
 .filter "humanizeText", ->
   (text) ->
     # TODO: extend... a lot
@@ -78,3 +84,17 @@ angular.module('flinkApp')
 
 .filter "toUpperCase", ->
   (text) -> text.toUpperCase()
+
+.filter "percentage", ->
+  (number) -> (number * 100).toFixed(0) + '%'
+
+.filter "humanizeWatermark", (watermarksConfig) ->
+  (value) ->
+    if isNaN(value) || value <= watermarksConfig.noWatermark
+      return 'No Watermark'
+    else
+      return value
+
+.filter "increment", ->
+  (number) ->
+    parseInt(number) + 1

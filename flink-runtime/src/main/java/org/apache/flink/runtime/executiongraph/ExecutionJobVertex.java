@@ -30,9 +30,9 @@ import org.apache.flink.core.io.InputSplitSource;
 import org.apache.flink.core.io.LocatableInputSplit;
 import org.apache.flink.runtime.JobException;
 import org.apache.flink.runtime.accumulators.StringifiedAccumulatorResult;
-import org.apache.flink.runtime.checkpoint.stats.CheckpointStatsTracker;
-import org.apache.flink.runtime.checkpoint.stats.OperatorCheckpointStats;
+import org.apache.flink.runtime.concurrent.Future;
 import org.apache.flink.runtime.execution.ExecutionState;
+import org.apache.flink.runtime.instance.SimpleSlot;
 import org.apache.flink.runtime.instance.SlotProvider;
 import org.apache.flink.runtime.jobgraph.IntermediateDataSet;
 import org.apache.flink.runtime.jobgraph.IntermediateDataSetID;
@@ -41,13 +41,12 @@ import org.apache.flink.runtime.jobgraph.JobVertex;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobmanager.JobManagerOptions;
 import org.apache.flink.runtime.jobmanager.scheduler.CoLocationGroup;
-import org.apache.flink.runtime.jobmanager.scheduler.NoResourceAvailableException;
 import org.apache.flink.runtime.jobmanager.scheduler.SlotSharingGroup;
-import org.apache.flink.runtime.util.SerializableObject;
+import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
 import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.SerializedValue;
+
 import org.slf4j.Logger;
-import scala.Option;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -60,8 +59,10 @@ public class ExecutionJobVertex implements AccessExecutionJobVertex, Archiveable
 
 	/** Use the same log for all ExecutionGraph classes */
 	private static final Logger LOG = ExecutionGraph.LOG;
-	
-	private final SerializableObject stateMonitor = new SerializableObject();
+
+	public static final int VALUE_NOT_SET = -1;
+
+	private final Object stateMonitor = new Object();
 	
 	private final ExecutionGraph graph;
 	
@@ -69,30 +70,32 @@ public class ExecutionJobVertex implements AccessExecutionJobVertex, Archiveable
 	
 	private final ExecutionVertex[] taskVertices;
 
-	private IntermediateResult[] producedDataSets;
+	private final IntermediateResult[] producedDataSets;
 	
 	private final List<IntermediateResult> inputs;
 	
 	private final int parallelism;
 
-	private final int maxParallelism;
-	
 	private final boolean[] finishedSubtasks;
-			
-	private volatile int numSubtasksInFinalState;
-	
+
 	private final SlotSharingGroup slotSharingGroup;
-	
+
 	private final CoLocationGroup coLocationGroup;
-	
+
 	private final InputSplit[] inputSplits;
+
+	private final boolean maxParallelismConfigured;
+
+	private int maxParallelism;
+
+	private volatile int numSubtasksInFinalState;
 
 	/**
 	 * Serialized task information which is for all sub tasks the same. Thus, it avoids to
 	 * serialize the same information multiple times in order to create the
 	 * TaskDeploymentDescriptors.
 	 */
-	private final SerializedValue<TaskInformation> serializedTaskInformation;
+	private SerializedValue<TaskInformation> serializedTaskInformation;
 
 	private InputSplitAssigner splitAssigner;
 	
@@ -100,7 +103,7 @@ public class ExecutionJobVertex implements AccessExecutionJobVertex, Archiveable
 		ExecutionGraph graph,
 		JobVertex jobVertex,
 		int defaultParallelism,
-		Time timeout) throws JobException, IOException {
+		Time timeout) throws JobException {
 
 		this(graph, jobVertex, defaultParallelism, timeout, System.currentTimeMillis());
 	}
@@ -110,7 +113,7 @@ public class ExecutionJobVertex implements AccessExecutionJobVertex, Archiveable
 		JobVertex jobVertex,
 		int defaultParallelism,
 		Time timeout,
-		long createTimestamp) throws JobException, IOException {
+		long createTimestamp) throws JobException {
 
 		if (graph == null || jobVertex == null) {
 			throw new NullPointerException();
@@ -124,24 +127,19 @@ public class ExecutionJobVertex implements AccessExecutionJobVertex, Archiveable
 
 		this.parallelism = numTaskVertices;
 
-		int maxP = jobVertex.getMaxParallelism();
+		final int configuredMaxParallelism = jobVertex.getMaxParallelism();
 
-		Preconditions.checkArgument(maxP >= parallelism, "The maximum parallelism (" +
-			maxP + ") must be greater or equal than the parallelism (" + parallelism +
-			").");
-		this.maxParallelism = maxP;
+		this.maxParallelismConfigured = (VALUE_NOT_SET != configuredMaxParallelism);
 
-		this.serializedTaskInformation = new SerializedValue<>(new TaskInformation(
-			jobVertex.getID(),
-			jobVertex.getName(),
-			parallelism,
-			maxParallelism,
-			jobVertex.getInvokableClassName(),
-			jobVertex.getConfiguration()));
+		// if no max parallelism was configured by the user, we calculate and set a default
+		setMaxParallelismInternal(maxParallelismConfigured ?
+				configuredMaxParallelism : KeyGroupRangeAssignment.computeDefaultMaxParallelism(parallelism));
+
+		this.serializedTaskInformation = null;
 
 		this.taskVertices = new ExecutionVertex[numTaskVertices];
 		
-		this.inputs = new ArrayList<IntermediateResult>(jobVertex.getInputs().size());
+		this.inputs = new ArrayList<>(jobVertex.getInputs().size());
 		
 		// take the sharing group
 		this.slotSharingGroup = jobVertex.getSlotSharingGroup();
@@ -215,6 +213,24 @@ public class ExecutionJobVertex implements AccessExecutionJobVertex, Archiveable
 		finishedSubtasks = new boolean[parallelism];
 	}
 
+	public void setMaxParallelism(int maxParallelismDerived) {
+
+		Preconditions.checkState(!maxParallelismConfigured,
+				"Attempt to override a configured max parallelism. Configured: " + this.maxParallelism
+						+ ", argument: " + maxParallelismDerived);
+
+		setMaxParallelismInternal(maxParallelismDerived);
+	}
+
+	private void setMaxParallelismInternal(int maxParallelism) {
+		Preconditions.checkArgument(maxParallelism > 0
+						&& maxParallelism <= KeyGroupRangeAssignment.UPPER_BOUND_MAX_PARALLELISM,
+				"Overriding max parallelism is not in valid bounds (1.." +
+						KeyGroupRangeAssignment.UPPER_BOUND_MAX_PARALLELISM + "), found:" + maxParallelism);
+
+		this.maxParallelism = maxParallelism;
+	}
+
 	public ExecutionGraph getGraph() {
 		return graph;
 	}
@@ -236,6 +252,10 @@ public class ExecutionJobVertex implements AccessExecutionJobVertex, Archiveable
 	@Override
 	public int getMaxParallelism() {
 		return maxParallelism;
+	}
+
+	public boolean isMaxParallelismConfigured() {
+		return maxParallelismConfigured;
 	}
 
 	public JobID getJobId() {
@@ -272,33 +292,55 @@ public class ExecutionJobVertex implements AccessExecutionJobVertex, Archiveable
 		return inputs;
 	}
 
-	public SerializedValue<TaskInformation> getSerializedTaskInformation() {
+	public SerializedValue<TaskInformation> getSerializedTaskInformation() throws IOException {
+
+		if (null == serializedTaskInformation) {
+
+			int parallelism = getParallelism();
+			int maxParallelism = getMaxParallelism();
+
+			if (LOG.isDebugEnabled()) {
+				LOG.debug("Creating task information for " + generateDebugString());
+			}
+
+			serializedTaskInformation = new SerializedValue<>(
+					new TaskInformation(
+							jobVertex.getID(),
+							jobVertex.getName(),
+							parallelism,
+							maxParallelism,
+							jobVertex.getInvokableClassName(),
+							jobVertex.getConfiguration()));
+		}
+
 		return serializedTaskInformation;
 	}
-	
+
 	public boolean isInFinalState() {
 		return numSubtasksInFinalState == parallelism;
 	}
-	
+
 	@Override
 	public ExecutionState getAggregateState() {
 		int[] num = new int[ExecutionState.values().length];
 		for (ExecutionVertex vertex : this.taskVertices) {
 			num[vertex.getExecutionState().ordinal()]++;
 		}
-		
+
 		return getAggregateJobVertexState(num, parallelism);
 	}
-	
-	@Override
-	public Option<OperatorCheckpointStats> getCheckpointStats() {
-		CheckpointStatsTracker tracker = getGraph().getCheckpointStatsTracker();
-		if (tracker == null) {
-			return Option.empty();
-		} else {
-			return tracker.getOperatorStats(getJobVertexId());
-		}
+
+	private String generateDebugString() {
+
+		return "ExecutionJobVertex" +
+				"(" + jobVertex.getName() + " | " + jobVertex.getID() + ")" +
+				"{" +
+				"parallelism=" + parallelism +
+				", maxParallelism=" + getMaxParallelism() +
+				", maxParallelismConfigured=" + maxParallelismConfigured +
+				'}';
 	}
+
 
 	//---------------------------------------------------------------------------------------------
 	
@@ -346,14 +388,56 @@ public class ExecutionJobVertex implements AccessExecutionJobVertex, Archiveable
 	//  Actions
 	//---------------------------------------------------------------------------------------------
 	
-	public void scheduleAll(SlotProvider slotProvider, boolean queued) throws NoResourceAvailableException {
+	public void scheduleAll(SlotProvider slotProvider, boolean queued) {
 		
-		ExecutionVertex[] vertices = this.taskVertices;
+		final ExecutionVertex[] vertices = this.taskVertices;
 
 		// kick off the tasks
 		for (ExecutionVertex ev : vertices) {
 			ev.scheduleForExecution(slotProvider, queued);
 		}
+	}
+
+	/**
+	 * Acquires a slot for all the execution vertices of this ExecutionJobVertex. The method returns
+	 * pairs of the slots and execution attempts, to ease correlation between vertices and execution
+	 * attempts.
+	 * 
+	 * <p>If this method throws an exception, it makes sure to release all so far requested slots.
+	 * 
+	 * @param resourceProvider The resource provider from whom the slots are requested.
+	 */
+	public ExecutionAndSlot[] allocateResourcesForAll(SlotProvider resourceProvider, boolean queued) {
+		final ExecutionVertex[] vertices = this.taskVertices;
+		final ExecutionAndSlot[] slots = new ExecutionAndSlot[vertices.length];
+
+		// try to acquire a slot future for each execution.
+		// we store the execution with the future just to be on the safe side
+		for (int i = 0; i < vertices.length; i++) {
+
+			// we use this flag to handle failures in a 'finally' clause
+			// that allows us to not go through clumsy cast-and-rethrow logic
+			boolean successful = false;
+
+			try {
+				// allocate the next slot (future)
+				final Execution exec = vertices[i].getCurrentExecutionAttempt();
+				final Future<SimpleSlot> future = exec.allocateSlotForExecution(resourceProvider, queued);
+				slots[i] = new ExecutionAndSlot(exec, future);
+				successful = true;
+			}
+			finally {
+				if (!successful) {
+					// this is the case if an exception was thrown
+					for (int k = 0; k < i; k++) {
+						ExecutionGraphUtils.releaseSlotFuture(slots[k].slotFuture);
+					}
+				}
+			}
+		}
+
+		// all good, we acquired all slots
+		return slots;
 	}
 
 	public void cancel() {

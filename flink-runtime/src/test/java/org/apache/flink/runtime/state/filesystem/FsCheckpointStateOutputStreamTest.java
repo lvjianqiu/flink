@@ -18,14 +18,18 @@
 
 package org.apache.flink.runtime.state.filesystem;
 
+import org.apache.flink.configuration.ConfigConstants;
+import org.apache.flink.core.fs.FSDataOutputStream;
 import org.apache.flink.core.fs.FileSystem;
 import org.apache.flink.core.fs.Path;
+import org.apache.flink.runtime.state.CheckpointStreamFactory;
 import org.apache.flink.runtime.state.StreamStateHandle;
 import org.apache.flink.runtime.state.filesystem.FsCheckpointStreamFactory.FsCheckpointStateOutputStream;
 import org.apache.flink.runtime.state.memory.ByteStreamStateHandle;
 
 import org.junit.Assert;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.io.DataInputStream;
 import java.io.File;
@@ -37,6 +41,13 @@ import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.mockito.Matchers.any;
+import static org.mockito.Matchers.anyBoolean;
+import static org.mockito.Matchers.eq;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 public class FsCheckpointStateOutputStreamTest {
 
@@ -97,7 +108,7 @@ public class FsCheckpointStateOutputStreamTest {
 
 		stream = new FsCheckpointStreamFactory.FsCheckpointStateOutputStream(TEMP_DIR_PATH, FileSystem.getLocalFileSystem(), 31, 17);
 
-		byte[] data = "testme!".getBytes();
+		byte[] data = "testme!".getBytes(ConfigConstants.DEFAULT_CHARSET);
 
 		for (int i = 0; i < 7; ++i) {
 			Assert.assertEquals(i * (1 + data.length), stream.getPos());
@@ -106,6 +117,69 @@ public class FsCheckpointStateOutputStreamTest {
 		}
 
 		stream.closeAndGetHandle();
+	}
+
+	/**
+	 * Tests that the underlying stream file is deleted upon calling close.
+	 */
+	@Test
+	public void testCleanupWhenClosingStream() throws IOException {
+
+		final FileSystem fs = mock(FileSystem.class);
+		final FSDataOutputStream outputStream = mock(FSDataOutputStream.class);
+
+		final ArgumentCaptor<Path> pathCaptor = ArgumentCaptor.forClass(Path.class);
+
+		when(fs.create(pathCaptor.capture(), anyBoolean())).thenReturn(outputStream);
+
+		CheckpointStreamFactory.CheckpointStateOutputStream stream = new FsCheckpointStreamFactory.FsCheckpointStateOutputStream(
+			TEMP_DIR_PATH,
+			fs,
+			4,
+			0);
+
+		// this should create the underlying file stream
+		stream.write(new byte[]{1,2,3,4,5});
+
+		verify(fs).create(any(Path.class), anyBoolean());
+
+		stream.close();
+
+		verify(fs).delete(eq(pathCaptor.getValue()), anyBoolean());
+	}
+
+	/**
+	 * Tests that the underlying stream file is deleted if the closeAndGetHandle method fails.
+	 */
+	@Test
+	public void testCleanupWhenFailingCloseAndGetHandle() throws IOException {
+		final FileSystem fs = mock(FileSystem.class);
+		final FSDataOutputStream outputStream = mock(FSDataOutputStream.class);
+
+		final ArgumentCaptor<Path>  pathCaptor = ArgumentCaptor.forClass(Path.class);
+
+		when(fs.create(pathCaptor.capture(), anyBoolean())).thenReturn(outputStream);
+		doThrow(new IOException("Test IOException.")).when(outputStream).close();
+
+		CheckpointStreamFactory.CheckpointStateOutputStream stream = new FsCheckpointStreamFactory.FsCheckpointStateOutputStream(
+			TEMP_DIR_PATH,
+			fs,
+			4,
+			0);
+
+		// this should create the underlying file stream
+		stream.write(new byte[]{1,2,3,4,5});
+
+		verify(fs).create(any(Path.class), anyBoolean());
+
+		try {
+			stream.closeAndGetHandle();
+			fail("Expected IOException");
+		} catch (IOException ioE) {
+			// expected exception
+		}
+
+		verify(fs).delete(eq(pathCaptor.getValue()), anyBoolean());
 	}
 
 	private void runTest(int numBytes, int bufferSize, int threshold, boolean expectFile) throws Exception {

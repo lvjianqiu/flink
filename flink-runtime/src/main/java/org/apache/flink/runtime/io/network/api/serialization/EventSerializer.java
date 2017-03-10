@@ -18,8 +18,11 @@
 
 package org.apache.flink.runtime.io.network.api.serialization;
 
+import java.nio.charset.Charset;
 import org.apache.flink.core.memory.MemorySegment;
 import org.apache.flink.core.memory.MemorySegmentFactory;
+import org.apache.flink.runtime.checkpoint.CheckpointOptions;
+import org.apache.flink.runtime.checkpoint.CheckpointOptions.CheckpointType;
 import org.apache.flink.runtime.event.AbstractEvent;
 import org.apache.flink.runtime.io.network.api.CancelCheckpointMarker;
 import org.apache.flink.runtime.io.network.api.CheckpointBarrier;
@@ -34,11 +37,14 @@ import org.apache.flink.util.InstantiationUtil;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import org.apache.flink.util.Preconditions;
 
 /**
  * Utility class to serialize and deserialize task events.
  */
 public class EventSerializer {
+
+	private static final Charset STRING_CODING_CHARSET = Charset.forName("UTF-8");
 
 	private static final int END_OF_PARTITION_EVENT = 0;
 
@@ -60,10 +66,34 @@ public class EventSerializer {
 		else if (eventClass == CheckpointBarrier.class) {
 			CheckpointBarrier barrier = (CheckpointBarrier) event;
 
-			ByteBuffer buf = ByteBuffer.allocate(20);
-			buf.putInt(0, CHECKPOINT_BARRIER_EVENT);
-			buf.putLong(4, barrier.getId());
-			buf.putLong(12, barrier.getTimestamp());
+			CheckpointOptions checkpointOptions = barrier.getCheckpointOptions();
+			CheckpointType checkpointType = checkpointOptions.getCheckpointType();
+
+			ByteBuffer buf;
+			if (checkpointType == CheckpointType.FULL_CHECKPOINT) {
+				buf = ByteBuffer.allocate(24);
+				buf.putInt(0, CHECKPOINT_BARRIER_EVENT);
+				buf.putLong(4, barrier.getId());
+				buf.putLong(12, barrier.getTimestamp());
+				buf.putInt(20, checkpointType.ordinal());
+			} else if (checkpointType == CheckpointType.SAVEPOINT) {
+				String targetLocation = checkpointOptions.getTargetLocation();
+				assert(targetLocation != null);
+				byte[] locationBytes = targetLocation.getBytes(STRING_CODING_CHARSET);
+
+				buf = ByteBuffer.allocate(24 + 4 + locationBytes.length);
+				buf.putInt(0, CHECKPOINT_BARRIER_EVENT);
+				buf.putLong(4, barrier.getId());
+				buf.putLong(12, barrier.getTimestamp());
+				buf.putInt(20, checkpointType.ordinal());
+				buf.putInt(24, locationBytes.length);
+				for (int i = 0; i < locationBytes.length; i++) {
+					buf.put(28 + i, locationBytes[i]);
+				}
+			} else {
+				throw new IOException("Unknown checkpoint type: " + checkpointType);
+			}
+
 			return buf;
 		}
 		else if (eventClass == EndOfSuperstepEvent.class) {
@@ -91,6 +121,70 @@ public class EventSerializer {
 		}
 	}
 
+	/**
+	 * Identifies whether the given buffer encodes the given event.
+	 *
+	 * <p><strong>Pre-condition</strong>: This buffer must encode some event!</p>
+	 *
+	 * @param buffer the buffer to peak into
+	 * @param eventClass the expected class of the event type
+	 * @param classLoader the class loader to use for custom event classes
+	 * @return whether the event class of the <tt>buffer</tt> matches the given <tt>eventClass</tt>
+	 * @throws IOException
+	 */
+	private static boolean isEvent(ByteBuffer buffer, Class<?> eventClass, ClassLoader classLoader) throws IOException {
+		if (buffer.remaining() < 4) {
+			throw new IOException("Incomplete event");
+		}
+
+		final int bufferPos = buffer.position();
+		final ByteOrder bufferOrder = buffer.order();
+		buffer.order(ByteOrder.BIG_ENDIAN);
+
+		try {
+			int type = buffer.getInt();
+
+			switch (type) {
+				case END_OF_PARTITION_EVENT:
+					return eventClass.equals(EndOfPartitionEvent.class);
+				case CHECKPOINT_BARRIER_EVENT:
+					return eventClass.equals(CheckpointBarrier.class);
+				case END_OF_SUPERSTEP_EVENT:
+					return eventClass.equals(EndOfSuperstepEvent.class);
+				case CANCEL_CHECKPOINT_MARKER_EVENT:
+					return eventClass.equals(CancelCheckpointMarker.class);
+				case OTHER_EVENT:
+					try {
+						final DataInputDeserializer deserializer = new DataInputDeserializer(buffer);
+						final String className = deserializer.readUTF();
+
+						final Class<? extends AbstractEvent> clazz;
+						try {
+							clazz = classLoader.loadClass(className).asSubclass(AbstractEvent.class);
+						}
+						catch (ClassNotFoundException e) {
+							throw new IOException("Could not load event class '" + className + "'.", e);
+						}
+						catch (ClassCastException e) {
+							throw new IOException("The class '" + className + "' is not a valid subclass of '"
+								+ AbstractEvent.class.getName() + "'.", e);
+						}
+						return eventClass.equals(clazz);
+					}
+					catch (Exception e) {
+						throw new IOException("Error while deserializing or instantiating event.", e);
+					}
+				default:
+					throw new IOException("Corrupt byte stream for event");
+			}
+		}
+		finally {
+			buffer.order(bufferOrder);
+			// restore the original position in the buffer (recall: we only peak into it!)
+			buffer.position(bufferPos);
+		}
+	}
+
 	public static AbstractEvent fromSerializedEvent(ByteBuffer buffer, ClassLoader classLoader) throws IOException {
 		if (buffer.remaining() < 4) {
 			throw new IOException("Incomplete event");
@@ -108,7 +202,27 @@ public class EventSerializer {
 			else if (type == CHECKPOINT_BARRIER_EVENT) {
 				long id = buffer.getLong();
 				long timestamp = buffer.getLong();
-				return new CheckpointBarrier(id, timestamp);
+
+				CheckpointOptions checkpointOptions;
+
+				int checkpointTypeOrdinal = buffer.getInt();
+				Preconditions.checkElementIndex(type, CheckpointType.values().length, "Illegal CheckpointType ordinal");
+				CheckpointType checkpointType = CheckpointType.values()[checkpointTypeOrdinal];
+
+				if (checkpointType == CheckpointType.FULL_CHECKPOINT) {
+					checkpointOptions = CheckpointOptions.forFullCheckpoint();
+				} else if (checkpointType == CheckpointType.SAVEPOINT) {
+					int len = buffer.getInt();
+					byte[] bytes = new byte[len];
+					buffer.get(bytes);
+					String targetLocation = new String(bytes, STRING_CODING_CHARSET);
+
+					checkpointOptions = CheckpointOptions.forSavepoint(targetLocation);
+				} else {
+					throw new IOException("Unknown checkpoint type: " + checkpointType);
+				}
+
+				return new CheckpointBarrier(id, timestamp, checkpointOptions);
 			}
 			else if (type == END_OF_SUPERSTEP_EVENT) {
 				return EndOfSuperstepEvent.INSTANCE;
@@ -169,5 +283,21 @@ public class EventSerializer {
 
 	public static AbstractEvent fromBuffer(Buffer buffer, ClassLoader classLoader) throws IOException {
 		return fromSerializedEvent(buffer.getNioBuffer(), classLoader);
+	}
+
+	/**
+	 * Identifies whether the given buffer encodes the given event.
+	 *
+	 * @param buffer the buffer to peak into
+	 * @param eventClass the expected class of the event type
+	 * @param classLoader the class loader to use for custom event classes
+	 * @return whether the event class of the <tt>buffer</tt> matches the given <tt>eventClass</tt>
+	 * @throws IOException
+	 */
+	public static boolean isEvent(final Buffer buffer,
+		final Class<?> eventClass,
+		final ClassLoader classLoader) throws IOException {
+		return !buffer.isBuffer() &&
+			isEvent(buffer.getNioBuffer(), eventClass, classLoader);
 	}
 }

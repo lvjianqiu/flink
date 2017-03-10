@@ -26,6 +26,7 @@ import org.apache.flink.runtime.akka.ListeningBehaviour
 import org.apache.flink.runtime.checkpoint.{CheckpointCoordinator, CompletedCheckpoint}
 import org.apache.flink.runtime.client.JobExecutionException
 import org.apache.flink.runtime.concurrent.impl.FlinkCompletableFuture
+import org.apache.flink.runtime.io.network.partition.ResultPartitionType
 import org.apache.flink.runtime.jobgraph.tasks.{ExternalizedCheckpointSettings, JobSnapshottingSettings}
 import org.apache.flink.runtime.jobgraph.{DistributionPattern, JobGraph, JobVertex, ScheduleMode}
 import org.apache.flink.runtime.jobmanager.Tasks._
@@ -33,6 +34,7 @@ import org.apache.flink.runtime.jobmanager.scheduler.{NoResourceAvailableExcepti
 import org.apache.flink.runtime.messages.JobManagerMessages._
 import org.apache.flink.runtime.testingUtils.TestingJobManagerMessages._
 import org.apache.flink.runtime.testingUtils.{ScalaTestingUtils, TestingUtils}
+import org.apache.flink.runtime.testtasks._
 import org.junit.runner.RunWith
 import org.mockito.Mockito
 import org.mockito.Mockito._
@@ -179,7 +181,8 @@ class JobManagerITCase(_system: ActorSystem)
       sender.setParallelism(num_tasks)
       receiver.setParallelism(num_tasks)
 
-      receiver.connectNewDataSetAsInput(sender, DistributionPattern.POINTWISE)
+      receiver.connectNewDataSetAsInput(sender, DistributionPattern.POINTWISE,
+        ResultPartitionType.PIPELINED)
 
       val jobGraph = new JobGraph("Pointwise Job", sender, receiver)
 
@@ -214,7 +217,8 @@ class JobManagerITCase(_system: ActorSystem)
       sender.setParallelism(num_tasks)
       receiver.setParallelism(num_tasks)
 
-      receiver.connectNewDataSetAsInput(sender, DistributionPattern.POINTWISE)
+      receiver.connectNewDataSetAsInput(sender, DistributionPattern.POINTWISE,
+        ResultPartitionType.PIPELINED)
 
       val jobGraph = new JobGraph("Bipartite Job", sender, receiver)
 
@@ -250,8 +254,10 @@ class JobManagerITCase(_system: ActorSystem)
       sender2.setParallelism(2 * num_tasks)
       receiver.setParallelism(3 * num_tasks)
 
-      receiver.connectNewDataSetAsInput(sender1, DistributionPattern.POINTWISE)
-      receiver.connectNewDataSetAsInput(sender2, DistributionPattern.ALL_TO_ALL)
+      receiver.connectNewDataSetAsInput(sender1, DistributionPattern.POINTWISE,
+        ResultPartitionType.PIPELINED)
+      receiver.connectNewDataSetAsInput(sender2, DistributionPattern.ALL_TO_ALL,
+        ResultPartitionType.PIPELINED)
 
       val jobGraph = new JobGraph("Bipartite Job", sender1, receiver, sender2)
 
@@ -295,8 +301,10 @@ class JobManagerITCase(_system: ActorSystem)
       sender2.setParallelism(2 * num_tasks)
       receiver.setParallelism(3 * num_tasks)
 
-      receiver.connectNewDataSetAsInput(sender1, DistributionPattern.POINTWISE)
-      receiver.connectNewDataSetAsInput(sender2, DistributionPattern.ALL_TO_ALL)
+      receiver.connectNewDataSetAsInput(sender1, DistributionPattern.POINTWISE,
+        ResultPartitionType.PIPELINED)
+      receiver.connectNewDataSetAsInput(sender2, DistributionPattern.ALL_TO_ALL,
+        ResultPartitionType.PIPELINED)
 
       val jobGraph = new JobGraph("Bipartite Job", sender1, receiver, sender2)
 
@@ -337,8 +345,10 @@ class JobManagerITCase(_system: ActorSystem)
       forwarder.setSlotSharingGroup(sharingGroup)
       receiver.setSlotSharingGroup(sharingGroup)
 
-      forwarder.connectNewDataSetAsInput(sender, DistributionPattern.ALL_TO_ALL)
-      receiver.connectNewDataSetAsInput(forwarder, DistributionPattern.ALL_TO_ALL)
+      forwarder.connectNewDataSetAsInput(sender, DistributionPattern.ALL_TO_ALL,
+        ResultPartitionType.PIPELINED)
+      receiver.connectNewDataSetAsInput(forwarder, DistributionPattern.ALL_TO_ALL,
+        ResultPartitionType.PIPELINED)
 
       val jobGraph = new JobGraph("Forwarding Job", sender, forwarder, receiver)
 
@@ -374,7 +384,8 @@ class JobManagerITCase(_system: ActorSystem)
       sender.setParallelism(num_tasks)
       receiver.setParallelism(num_tasks)
 
-      receiver.connectNewDataSetAsInput(sender, DistributionPattern.POINTWISE)
+      receiver.connectNewDataSetAsInput(sender, DistributionPattern.POINTWISE,
+        ResultPartitionType.PIPELINED)
 
       val jobGraph = new JobGraph("Pointwise Job", sender, receiver)
 
@@ -422,7 +433,8 @@ class JobManagerITCase(_system: ActorSystem)
       sender.setParallelism(num_tasks)
       receiver.setParallelism(num_tasks)
 
-      receiver.connectNewDataSetAsInput(sender, DistributionPattern.POINTWISE)
+      receiver.connectNewDataSetAsInput(sender, DistributionPattern.POINTWISE,
+        ResultPartitionType.PIPELINED)
 
       val jobGraph = new JobGraph("Pointwise Job", sender, receiver)
 
@@ -467,7 +479,8 @@ class JobManagerITCase(_system: ActorSystem)
       sender.setParallelism(num_tasks)
       receiver.setParallelism(num_tasks)
 
-      receiver.connectNewDataSetAsInput(sender, DistributionPattern.POINTWISE)
+      receiver.connectNewDataSetAsInput(sender, DistributionPattern.POINTWISE,
+        ResultPartitionType.PIPELINED)
 
       val jobGraph = new JobGraph("Pointwise job", sender, receiver)
 
@@ -507,7 +520,8 @@ class JobManagerITCase(_system: ActorSystem)
       sender.setParallelism(num_tasks)
       receiver.setParallelism(num_tasks)
 
-      receiver.connectNewDataSetAsInput(sender, DistributionPattern.POINTWISE)
+      receiver.connectNewDataSetAsInput(sender, DistributionPattern.POINTWISE,
+        ResultPartitionType.PIPELINED)
 
       val jobGraph = new JobGraph("Pointwise job", sender, receiver)
 
@@ -555,7 +569,8 @@ class JobManagerITCase(_system: ActorSystem)
       sender.setParallelism(num_tasks)
       receiver.setParallelism(num_tasks)
 
-      receiver.connectNewDataSetAsInput(sender, DistributionPattern.POINTWISE)
+      receiver.connectNewDataSetAsInput(sender, DistributionPattern.POINTWISE,
+        ResultPartitionType.PIPELINED)
 
       val jobGraph = new JobGraph("Pointwise job", sender, receiver)
 
@@ -816,7 +831,13 @@ class JobManagerITCase(_system: ActorSystem)
             java.util.Collections.emptyList(),
             java.util.Collections.emptyList(),
             java.util.Collections.emptyList(),
-            60000, 60000, 60000, 1, ExternalizedCheckpointSettings.none))
+            60000,
+            60000,
+            60000,
+            1,
+            ExternalizedCheckpointSettings.none,
+            null,
+            true))
 
           // Submit job...
           jobManager.tell(SubmitJob(jobGraph, ListeningBehaviour.DETACHED), testActor)
@@ -870,7 +891,13 @@ class JobManagerITCase(_system: ActorSystem)
             java.util.Collections.emptyList(),
             java.util.Collections.emptyList(),
             java.util.Collections.emptyList(),
-            60000, 60000, 60000, 1, ExternalizedCheckpointSettings.none))
+            60000,
+            60000,
+            60000,
+            1,
+            ExternalizedCheckpointSettings.none,
+            null,
+            true))
 
           // Submit job...
           jobManager.tell(SubmitJob(jobGraph, ListeningBehaviour.DETACHED), testActor)
@@ -932,7 +959,13 @@ class JobManagerITCase(_system: ActorSystem)
             java.util.Collections.emptyList(),
             java.util.Collections.emptyList(),
             java.util.Collections.emptyList(),
-            60000, 60000, 60000, 1, ExternalizedCheckpointSettings.none))
+            60000,
+            60000,
+            60000,
+            1,
+            ExternalizedCheckpointSettings.none,
+            null,
+            true))
 
           // Submit job...
           jobManager.tell(SubmitJob(jobGraph, ListeningBehaviour.DETACHED), testActor)
@@ -963,7 +996,7 @@ class JobManagerITCase(_system: ActorSystem)
           jobManager.tell(TriggerSavepoint(jobGraph.getJobID(), Option.apply("any")), testActor)
 
           val checkpoint = Mockito.mock(classOf[CompletedCheckpoint])
-          when(checkpoint.getExternalPath).thenReturn("Expected test savepoint path")
+          when(checkpoint.getExternalPointer).thenReturn("Expected test savepoint path")
 
           // Succeed the promise
           savepointPromise.complete(checkpoint)

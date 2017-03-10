@@ -28,6 +28,7 @@ import org.apache.flink.core.memory.MemorySegmentFactory;
 import org.apache.flink.runtime.accumulators.AccumulatorRegistry;
 import org.apache.flink.runtime.broadcast.BroadcastVariableManager;
 import org.apache.flink.runtime.checkpoint.CheckpointMetaData;
+import org.apache.flink.runtime.checkpoint.CheckpointMetrics;
 import org.apache.flink.runtime.checkpoint.SubtaskState;
 import org.apache.flink.runtime.event.AbstractEvent;
 import org.apache.flink.runtime.execution.Environment;
@@ -35,6 +36,7 @@ import org.apache.flink.runtime.executiongraph.ExecutionAttemptID;
 import org.apache.flink.runtime.io.disk.iomanager.IOManager;
 import org.apache.flink.runtime.io.disk.iomanager.IOManagerAsync;
 import org.apache.flink.runtime.io.network.api.serialization.AdaptiveSpanningRecordDeserializer;
+import org.apache.flink.runtime.io.network.api.serialization.EventSerializer;
 import org.apache.flink.runtime.io.network.api.serialization.RecordDeserializer;
 import org.apache.flink.runtime.io.network.api.writer.ResultPartitionWriter;
 import org.apache.flink.runtime.io.network.buffer.Buffer;
@@ -52,6 +54,8 @@ import org.apache.flink.runtime.plugable.NonReusingDeserializationDelegate;
 import org.apache.flink.runtime.query.KvStateRegistry;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.taskmanager.TaskManagerRuntimeInfo;
+import org.apache.flink.runtime.util.TestingTaskManagerRuntimeInfo;
+
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 
@@ -158,60 +162,71 @@ public class StreamMockEnvironment implements Environment {
 			final RecordDeserializer<DeserializationDelegate<T>> recordDeserializer = new AdaptiveSpanningRecordDeserializer<DeserializationDelegate<T>>();
 			final NonReusingDeserializationDelegate<T> delegate = new NonReusingDeserializationDelegate<T>(serializer);
 
-			// Add records from the buffer to the output list
+			// Add records and events from the buffer to the output list
 			doAnswer(new Answer<Void>() {
 
 				@Override
 				public Void answer(InvocationOnMock invocationOnMock) throws Throwable {
 					Buffer buffer = (Buffer) invocationOnMock.getArguments()[0];
-
-					recordDeserializer.setNextBuffer(buffer);
-
-					while (recordDeserializer.hasUnfinishedData()) {
-						RecordDeserializer.DeserializationResult result = recordDeserializer.getNextRecord(delegate);
-
-						if (result.isFullRecord()) {
-							outputList.add(delegate.getInstance());
-						}
-
-						if (result == RecordDeserializer.DeserializationResult.LAST_RECORD_FROM_BUFFER
-							|| result == RecordDeserializer.DeserializationResult.PARTIAL_RECORD) {
-							break;
-						}
-					}
-
+					addBufferToOutputList(recordDeserializer, delegate, buffer, outputList);
 					return null;
 				}
 			}).when(mockWriter).writeBuffer(any(Buffer.class), anyInt());
 
-			// Add events to the output list
 			doAnswer(new Answer<Void>() {
 
 				@Override
 				public Void answer(InvocationOnMock invocationOnMock) throws Throwable {
-					AbstractEvent event = (AbstractEvent) invocationOnMock.getArguments()[0];
-
-					outputList.add(event);
+					Buffer buffer = (Buffer) invocationOnMock.getArguments()[0];
+					addBufferToOutputList(recordDeserializer, delegate, buffer, outputList);
 					return null;
 				}
-			}).when(mockWriter).writeEvent(any(AbstractEvent.class), anyInt());
+			}).when(mockWriter).writeBufferToAllChannels(any(Buffer.class));
 
-			doAnswer(new Answer<Void>() {
-
-				@Override
-				public Void answer(InvocationOnMock invocationOnMock) throws Throwable {
-					AbstractEvent event = (AbstractEvent) invocationOnMock.getArguments()[0];
-
-					outputList.add(event);
-					return null;
-				}
-			}).when(mockWriter).writeEventToAllChannels(any(AbstractEvent.class));
 
 			outputs.add(mockWriter);
 		}
 		catch (Throwable t) {
 			t.printStackTrace();
 			fail(t.getMessage());
+		}
+	}
+
+	/**
+	 * Adds the object behind the given <tt>buffer</tt> to the <tt>outputList</tt>.
+	 *
+	 * @param recordDeserializer de-serializer to use for the buffer
+	 * @param delegate de-serialization delegate to use for non-event buffers
+	 * @param buffer the buffer to add
+	 * @param outputList the output list to add the object to
+	 * @param <T> type of the objects behind the non-event buffers
+	 *
+	 * @throws java.io.IOException
+	 */
+	private <T> void addBufferToOutputList(
+		RecordDeserializer<DeserializationDelegate<T>> recordDeserializer,
+		NonReusingDeserializationDelegate<T> delegate, Buffer buffer,
+		final Queue<Object> outputList) throws java.io.IOException {
+		if (buffer.isBuffer()) {
+			recordDeserializer.setNextBuffer(buffer);
+
+			while (recordDeserializer.hasUnfinishedData()) {
+				RecordDeserializer.DeserializationResult result =
+					recordDeserializer.getNextRecord(delegate);
+
+				if (result.isFullRecord()) {
+					outputList.add(delegate.getInstance());
+				}
+
+				if (result == RecordDeserializer.DeserializationResult.LAST_RECORD_FROM_BUFFER
+					|| result == RecordDeserializer.DeserializationResult.PARTIAL_RECORD) {
+					break;
+				}
+			}
+		} else {
+			// is event
+			AbstractEvent event = EventSerializer.fromBuffer(buffer, getClass().getClassLoader());
+			outputList.add(event);
 		}
 	}
 
@@ -313,12 +328,11 @@ public class StreamMockEnvironment implements Environment {
 	}
 
 	@Override
-	public void acknowledgeCheckpoint(CheckpointMetaData checkpointMetaData) {
+	public void acknowledgeCheckpoint(long checkpointId, CheckpointMetrics checkpointMetrics) {
 	}
 
 	@Override
-	public void acknowledgeCheckpoint(
-		CheckpointMetaData checkpointMetaData, SubtaskState subtaskState) {
+	public void acknowledgeCheckpoint(long checkpointId, CheckpointMetrics checkpointMetrics, SubtaskState subtaskState) {
 	}
 
 	@Override
@@ -335,7 +349,7 @@ public class StreamMockEnvironment implements Environment {
 
 	@Override
 	public TaskManagerRuntimeInfo getTaskManagerInfo() {
-		return new TaskManagerRuntimeInfo("localhost", new Configuration(), System.getProperty("java.io.tmpdir"));
+		return new TestingTaskManagerRuntimeInfo();
 	}
 
 	@Override

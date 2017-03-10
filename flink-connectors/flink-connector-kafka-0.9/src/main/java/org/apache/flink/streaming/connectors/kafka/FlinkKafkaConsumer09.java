@@ -39,6 +39,7 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
@@ -170,7 +171,7 @@ public class FlinkKafkaConsumer09<T> extends FlinkKafkaConsumerBase<T> {
 	@Override
 	protected AbstractFetcher<T, ?> createFetcher(
 			SourceContext<T> sourceContext,
-			List<KafkaTopicPartition> thisSubtaskPartitions,
+			Map<KafkaTopicPartition, Long> assignedPartitionsWithInitialOffsets,
 			SerializedValue<AssignerWithPeriodicWatermarks<T>> watermarksPeriodic,
 			SerializedValue<AssignerWithPunctuatedWatermarks<T>> watermarksPunctuated,
 			StreamingRuntimeContext runtimeContext) throws Exception {
@@ -179,7 +180,7 @@ public class FlinkKafkaConsumer09<T> extends FlinkKafkaConsumerBase<T> {
 
 		return new Kafka09Fetcher<>(
 				sourceContext,
-				thisSubtaskPartitions,
+				assignedPartitionsWithInitialOffsets,
 				watermarksPeriodic,
 				watermarksPunctuated,
 				runtimeContext.getProcessingTimeService(),
@@ -207,6 +208,9 @@ public class FlinkKafkaConsumer09<T> extends FlinkKafkaConsumerBase<T> {
 				// for non existing topics, the list might be null.
 				if (partitionsForTopic != null) {
 					partitions.addAll(convertToFlinkKafkaTopicPartition(partitionsForTopic));
+				}
+				else{
+					LOG.info("Unable to retrieve any partitions for the requested topic: {}", topic);
 				}
 			}
 		}

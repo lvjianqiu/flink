@@ -29,6 +29,7 @@ import org.apache.flink.streaming.util.serialization.KeyedDeserializationSchemaW
 import org.apache.flink.util.SerializedValue;
 
 import java.util.Collections;
+import java.util.Map;
 import java.util.List;
 import java.util.Properties;
 
@@ -127,7 +128,7 @@ public class FlinkKafkaConsumer010<T> extends FlinkKafkaConsumer09<T> {
 	@Override
 	protected AbstractFetcher<T, ?> createFetcher(
 			SourceContext<T> sourceContext,
-			List<KafkaTopicPartition> thisSubtaskPartitions,
+			Map<KafkaTopicPartition, Long> assignedPartitionsWithInitialOffsets,
 			SerializedValue<AssignerWithPeriodicWatermarks<T>> watermarksPeriodic,
 			SerializedValue<AssignerWithPunctuatedWatermarks<T>> watermarksPunctuated,
 			StreamingRuntimeContext runtimeContext) throws Exception {
@@ -136,7 +137,7 @@ public class FlinkKafkaConsumer010<T> extends FlinkKafkaConsumer09<T> {
 
 		return new Kafka010Fetcher<>(
 				sourceContext,
-				thisSubtaskPartitions,
+				assignedPartitionsWithInitialOffsets,
 				watermarksPeriodic,
 				watermarksPunctuated,
 				runtimeContext.getProcessingTimeService(),

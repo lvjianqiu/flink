@@ -111,8 +111,10 @@ public class StateInitializationContextImplTest {
 				writtenOperatorStates.add(val);
 			}
 
-			Map<String, long[]> offsetsMap = new HashMap<>();
-			offsetsMap.put(DefaultOperatorStateBackend.DEFAULT_OPERATOR_STATE_NAME, offsets.toArray());
+			Map<String, OperatorStateHandle.StateMetaInfo> offsetsMap = new HashMap<>();
+			offsetsMap.put(
+					DefaultOperatorStateBackend.DEFAULT_OPERATOR_STATE_NAME,
+					new OperatorStateHandle.StateMetaInfo(offsets.toArray(), OperatorStateHandle.Mode.SPLIT_DISTRIBUTE));
 			OperatorStateHandle operatorStateHandle =
 					new OperatorStateHandle(offsetsMap, new ByteStateHandleCloseChecking("os-" + i, out.toByteArray()));
 			operatorStateHandles.add(operatorStateHandle);
@@ -130,6 +132,27 @@ public class StateInitializationContextImplTest {
 
 	@Test
 	public void getOperatorStateStreams() throws Exception {
+
+		int i = 0;
+		int s = 0;
+		for (StatePartitionStreamProvider streamProvider : initializationContext.getRawOperatorStateInputs()) {
+			if (0 == i % 4) {
+				++i;
+			}
+			Assert.assertNotNull(streamProvider);
+			try (InputStream is = streamProvider.getStream()) {
+				DataInputView div = new DataInputViewStreamWrapper(is);
+
+				int val = div.readInt();
+				Assert.assertEquals(i * NUM_HANDLES + s, val);
+			}
+
+			++s;
+			if (s == i % 4) {
+				s = 0;
+				++i;
+			}
+		}
 
 	}
 

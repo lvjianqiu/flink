@@ -32,6 +32,7 @@ import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.query.KvStateRegistry;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.query.netty.KvStateServer;
+import org.apache.flink.runtime.state.internal.InternalKvState;
 import org.apache.flink.runtime.taskmanager.Task;
 import org.apache.flink.runtime.taskmanager.TaskManager;
 import org.apache.flink.util.Preconditions;
@@ -60,10 +61,10 @@ public class NetworkEnvironment {
 
 	private final TaskEventDispatcher taskEventDispatcher;
 
-	/** Server for {@link org.apache.flink.runtime.state.KvState} requests. */
+	/** Server for {@link InternalKvState} requests. */
 	private final KvStateServer kvStateServer;
 
-	/** Registry for {@link org.apache.flink.runtime.state.KvState} instances. */
+	/** Registry for {@link InternalKvState} instances. */
 	private final KvStateRegistry kvStateRegistry;
 
 	private final IOManager.IOMode defaultIOMode;
@@ -75,15 +76,15 @@ public class NetworkEnvironment {
 	private boolean isShutdown;
 
 	public NetworkEnvironment(
-		NetworkBufferPool networkBufferPool,
-		ConnectionManager connectionManager,
-		ResultPartitionManager resultPartitionManager,
-		TaskEventDispatcher taskEventDispatcher,
-		KvStateRegistry kvStateRegistry,
-		KvStateServer kvStateServer,
-		IOMode defaultIOMode,
-		int partitionRequestInitialBackoff,
-		int partitionRequestMaxBackoff) {
+			NetworkBufferPool networkBufferPool,
+			ConnectionManager connectionManager,
+			ResultPartitionManager resultPartitionManager,
+			TaskEventDispatcher taskEventDispatcher,
+			KvStateRegistry kvStateRegistry,
+			KvStateServer kvStateServer,
+			IOMode defaultIOMode,
+			int partitionRequestInitialBackoff,
+			int partitionRequestMaxBackoff) {
 
 		this.networkBufferPool = checkNotNull(networkBufferPool);
 		this.connectionManager = checkNotNull(connectionManager);
@@ -170,7 +171,7 @@ public class NetworkEnvironment {
 				BufferPool bufferPool = null;
 
 				try {
-					bufferPool = networkBufferPool.createBufferPool(partition.getNumberOfSubpartitions(), false);
+					bufferPool = networkBufferPool.createBufferPool(partition.getNumberOfSubpartitions());
 					partition.registerBufferPool(bufferPool);
 
 					resultPartitionManager.registerResultPartition(partition);
@@ -197,7 +198,7 @@ public class NetworkEnvironment {
 				BufferPool bufferPool = null;
 
 				try {
-					bufferPool = networkBufferPool.createBufferPool(gate.getNumberOfInputChannels(), false);
+					bufferPool = networkBufferPool.createBufferPool(gate.getNumberOfInputChannels());
 					gate.setBufferPool(bufferPool);
 				} catch (Throwable t) {
 					if (bufferPool != null) {

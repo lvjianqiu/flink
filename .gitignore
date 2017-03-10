@@ -27,5 +27,10 @@ out/
 /docs/content
 /docs/.bundle
 /docs/.rubydeps
+/docs/ruby2/.bundle
+/docs/ruby2/.rubydeps
+/docs/.jekyll-metadata
 *.ipr
 *.iws
+tools/flink
+tools/flink-*

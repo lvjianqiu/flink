@@ -67,6 +67,7 @@ import java.util.Map;
  * that no default Java serialization is used for serialization. Therefore, we
  * don't rely on any involved Java classes to stay the same.
  */
+@SuppressWarnings("deprecation")
 public class SavepointV0Serializer implements SavepointSerializer<SavepointV1> {
 
 	public static final SavepointV0Serializer INSTANCE = new SavepointV0Serializer();
@@ -106,16 +107,7 @@ public class SavepointV0Serializer implements SavepointSerializer<SavepointV1> {
 			for (int j = 0; j < numSubTaskStates; j++) {
 				int subtaskIndex = dis.readInt();
 
-				int length = dis.readInt();
-
-				SerializedValue<StateHandle<?>> serializedValue;
-				if (length == -1) {
-					serializedValue = new SerializedValue<>(null);
-				} else {
-					byte[] serializedData = new byte[length];
-					dis.readFully(serializedData, 0, length);
-					serializedValue = SerializedValue.fromBytes(serializedData);
-				}
+				SerializedValue<StateHandle<?>> serializedValue = readSerializedValueStateHandle(dis);
 
 				long stateSize = dis.readLong();
 				long duration = dis.readLong();
@@ -133,16 +125,7 @@ public class SavepointV0Serializer implements SavepointSerializer<SavepointV1> {
 			for (int j = 0; j < numKvStates; j++) {
 				int keyGroupIndex = dis.readInt();
 
-				int length = dis.readInt();
-
-				SerializedValue<StateHandle<?>> serializedValue;
-				if (length == -1) {
-					serializedValue = new SerializedValue<>(null);
-				} else {
-					byte[] serializedData = new byte[length];
-					dis.readFully(serializedData, 0, length);
-					serializedValue = SerializedValue.fromBytes(serializedData);
-				}
+				SerializedValue<StateHandle<?>> serializedValue = readSerializedValueStateHandle(dis);
 
 				long stateSize = dis.readLong();
 				long duration = dis.readLong();
@@ -157,10 +140,29 @@ public class SavepointV0Serializer implements SavepointSerializer<SavepointV1> {
 		}
 
 		try {
+
 			return convertSavepoint(taskStates, userClassLoader, checkpointId);
 		} catch (Exception e) {
+
 			throw new IOException(e);
 		}
+	}
+
+	private static SerializedValue<StateHandle<?>> readSerializedValueStateHandle(DataInputStream dis)
+			throws IOException {
+
+		int length = dis.readInt();
+
+		SerializedValue<StateHandle<?>> serializedValue;
+		if (length == -1) {
+			serializedValue = new SerializedValue<>(null);
+		} else {
+			byte[] serializedData = new byte[length];
+			dis.readFully(serializedData, 0, length);
+			serializedValue = SerializedValue.fromBytes(serializedData);
+		}
+
+		return serializedValue;
 	}
 
 	private SavepointV1 convertSavepoint(
@@ -252,7 +254,11 @@ public class SavepointV0Serializer implements SavepointSerializer<SavepointV1> {
 				null);
 	}
 
-	private StreamStateHandle convertOperatorAndFunctionState(StreamTaskState streamTaskState) throws Exception {
+	/**
+	 * This is public so that we can use it when restoring a legacy snapshot
+	 * in {@code AbstractStreamOperatorTestHarness}.
+	 */
+	public static StreamStateHandle convertOperatorAndFunctionState(StreamTaskState streamTaskState) throws Exception {
 
 		List<StreamStateHandle> mergeStateHandles = new ArrayList<>(4);
 
@@ -273,7 +279,11 @@ public class SavepointV0Serializer implements SavepointSerializer<SavepointV1> {
 		return new MigrationStreamStateHandle(new MultiStreamStateHandle(mergeStateHandles));
 	}
 
-	private KeyGroupsStateHandle convertKeyedBackendState(
+	/**
+	 * This is public so that we can use it when restoring a legacy snapshot
+	 * in {@code AbstractStreamOperatorTestHarness}.
+	 */
+	public static KeyGroupsStateHandle convertKeyedBackendState(
 			HashMap<String, KvStateSnapshot<?, ?, ?, ?>> oldKeyedState,
 			int parallelInstanceIdx,
 			long checkpointID) throws Exception {
@@ -327,7 +337,11 @@ public class SavepointV0Serializer implements SavepointSerializer<SavepointV1> {
 		return 0;
 	}
 
-	private static StreamStateHandle convertStateHandle(StateHandle<?> oldStateHandle) throws Exception {
+	/**
+	 * This is public so that we can use it when restoring a legacy snapshot
+	 * in {@code AbstractStreamOperatorTestHarness}.
+	 */
+	public static StreamStateHandle convertStateHandle(StateHandle<?> oldStateHandle) throws Exception {
 		if (oldStateHandle instanceof AbstractFileStateHandle) {
 			Path path = ((AbstractFileStateHandle) oldStateHandle).getFilePath();
 			return new FileStateHandle(path, oldStateHandle.getStateSize());

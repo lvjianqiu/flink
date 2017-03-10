@@ -21,12 +21,15 @@ package org.apache.flink.yarn;
 import org.apache.flink.client.CliFrontend;
 import org.apache.flink.client.deployment.ClusterDescriptor;
 import org.apache.flink.configuration.ConfigConstants;
+import org.apache.flink.configuration.CoreOptions;
 import org.apache.flink.configuration.GlobalConfiguration;
-import org.apache.flink.configuration.HighAvailabilityOptions;
 import org.apache.flink.configuration.IllegalConfigurationException;
+import org.apache.flink.configuration.SecurityOptions;
+import org.apache.flink.configuration.HighAvailabilityOptions;
 import org.apache.flink.runtime.akka.AkkaUtils;
+import org.apache.flink.runtime.clusterframework.BootstrapTools;
+import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.jobmanager.HighAvailabilityMode;
-import org.apache.flink.runtime.security.SecurityUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -60,6 +63,8 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.PrintStream;
+import java.io.FileOutputStream;
+import java.io.ObjectOutputStream;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.net.URISyntaxException;
@@ -404,6 +409,18 @@ public abstract class AbstractYarnClusterDescriptor implements ClusterDescriptor
 	@Override
 	public YarnClusterClient deploy() {
 		try {
+			if(UserGroupInformation.isSecurityEnabled()) {
+				// note: UGI::hasKerberosCredentials inaccurately reports false
+				// for logins based on a keytab (fixed in Hadoop 2.6.1, see HADOOP-10786),
+				// so we check only in ticket cache scenario.
+				boolean useTicketCache = flinkConfiguration.getBoolean(SecurityOptions.KERBEROS_LOGIN_USETICKETCACHE);
+				UserGroupInformation loginUser = UserGroupInformation.getCurrentUser();
+				if (useTicketCache && !loginUser.hasKerberosCredentials()) {
+					LOG.error("Hadoop security is enabled but the login user does not have Kerberos credentials");
+					throw new RuntimeException("Hadoop security is enabled but the login user " +
+							"does not have Kerberos credentials");
+				}
+			}
 			return deployInternal();
 		} catch (Exception e) {
 			throw new RuntimeException("Couldn't deploy Yarn cluster", e);
@@ -458,28 +475,6 @@ public abstract class AbstractYarnClusterDescriptor implements ClusterDescriptor
 		Map<String, String> dynProperties = getDynamicProperties(dynamicPropertiesEncoded);
 		for (Map.Entry<String, String> dynProperty : dynProperties.entrySet()) {
 			flinkConfiguration.setString(dynProperty.getKey(), dynProperty.getValue());
-		}
-
-		// ------------------ Set default file system scheme -------------------------
-
-		try {
-			org.apache.flink.core.fs.FileSystem.setDefaultScheme(flinkConfiguration);
-		} catch (IOException e) {
-			throw new IOException("Error while setting the default " +
-				"filesystem scheme from configuration.", e);
-		}
-
-		// initialize file system
-		// Copy the application master jar to the filesystem
-		// Create a local resource to point to the destination jar path
-		final FileSystem fs = FileSystem.get(conf);
-
-		// hard coded check for the GoogleHDFS client because its not overriding the getScheme() method.
-		if (!fs.getClass().getSimpleName().equals("GoogleHadoopFileSystem") &&
-			fs.getScheme().startsWith("file")) {
-			LOG.warn("The file system scheme is '" + fs.getScheme() + "'. This indicates that the "
-				+ "specified Hadoop configuration path is wrong and the system is using the default Hadoop configuration values."
-				+ "The Flink YARN client needs to store its files in a distributed file system");
 		}
 
 		// ------------------ Check if the YARN ClusterClient has the requested resources --------------
@@ -560,6 +555,44 @@ public abstract class AbstractYarnClusterDescriptor implements ClusterDescriptor
 			}
 		}
 
+		ApplicationReport report = startAppMaster(null, yarnClient, yarnApplication);
+
+		String host = report.getHost();
+		int port = report.getRpcPort();
+
+		// Correctly initialize the Flink config
+		flinkConfiguration.setString(ConfigConstants.JOB_MANAGER_IPC_ADDRESS_KEY, host);
+		flinkConfiguration.setInteger(ConfigConstants.JOB_MANAGER_IPC_PORT_KEY, port);
+
+		// the Flink cluster is deployed in YARN. Represent cluster
+		return createYarnClusterClient(this, yarnClient, report, flinkConfiguration, sessionFilesDir, true);
+	}
+
+	public ApplicationReport startAppMaster(JobGraph jobGraph, YarnClient yarnClient, YarnClientApplication yarnApplication) throws Exception {
+
+		// ------------------ Set default file system scheme -------------------------
+
+		try {
+			org.apache.flink.core.fs.FileSystem.setDefaultScheme(flinkConfiguration);
+		} catch (IOException e) {
+			throw new IOException("Error while setting the default " +
+					"filesystem scheme from configuration.", e);
+		}
+
+		// initialize file system
+		// Copy the application master jar to the filesystem
+		// Create a local resource to point to the destination jar path
+		final FileSystem fs = FileSystem.get(conf);
+
+		// hard coded check for the GoogleHDFS client because its not overriding the getScheme() method.
+		if (!fs.getClass().getSimpleName().equals("GoogleHadoopFileSystem") &&
+				fs.getScheme().startsWith("file")) {
+			LOG.warn("The file system scheme is '" + fs.getScheme() + "'. This indicates that the "
+					+ "specified Hadoop configuration path is wrong and the system is using the default Hadoop configuration values."
+					+ "The Flink YARN client needs to store its files in a distributed file system");
+		}
+
+		ApplicationSubmissionContext appContext = yarnApplication.getApplicationSubmissionContext();
 		Set<File> effectiveShipFiles = new HashSet<>(shipFiles.size());
 		for (File file : shipFiles) {
 			effectiveShipFiles.add(file.getAbsoluteFile());
@@ -583,12 +616,6 @@ public abstract class AbstractYarnClusterDescriptor implements ClusterDescriptor
 			}
 		}
 
-		//check if there is a JAAS config file
-		File jaasConfigFile = new File(configurationDirectory + File.separator + SecurityUtils.JAAS_CONF_FILENAME);
-		if (jaasConfigFile.exists() && jaasConfigFile.isFile()) {
-			effectiveShipFiles.add(jaasConfigFile);
-		}
-
 		addLibFolderToShipFiles(effectiveShipFiles);
 
 		// add the user jar to the classpath of the to-be-created cluster
@@ -596,8 +623,8 @@ public abstract class AbstractYarnClusterDescriptor implements ClusterDescriptor
 			effectiveShipFiles.addAll(userJarFiles);
 		}
 
+
 		// Set-up ApplicationSubmissionContext for the application
-		ApplicationSubmissionContext appContext = yarnApplication.getApplicationSubmissionContext();
 
 		final ApplicationId appId = appContext.getApplicationId();
 
@@ -694,6 +721,28 @@ public abstract class AbstractYarnClusterDescriptor implements ClusterDescriptor
 		paths.add(remotePathConf);
 		classPathBuilder.append("flink-conf.yaml").append(File.pathSeparator);
 
+		// write job graph to tmp file and add it to local resource
+		// TODO: server use user main method to generate job graph
+		if (jobGraph != null) {
+			try {
+				File fp = File.createTempFile(appId.toString(), null);
+				fp.deleteOnExit();
+				try (FileOutputStream output = new FileOutputStream(fp);
+					ObjectOutputStream obOutput = new ObjectOutputStream(output);){
+					obOutput.writeObject(jobGraph);
+				}
+				LocalResource jobgraph = Records.newRecord(LocalResource.class);
+				Path remoteJobGraph =
+						Utils.setupLocalResource(fs, appId.toString(), new Path(fp.toURI()), jobgraph, fs.getHomeDirectory());
+				localResources.put("job.graph", jobgraph);
+				paths.add(remoteJobGraph);
+				classPathBuilder.append("job.graph").append(File.pathSeparator);
+			} catch (Exception e) {
+				LOG.warn("Add job graph to local resource fail");
+				throw e;
+			}
+		}
+
 		sessionFilesDir = new Path(fs.getHomeDirectory(), ".flink/" + appId.toString() + "/");
 
 		FsPermission permission = new FsPermission(FsAction.ALL, FsAction.NONE, FsAction.NONE);
@@ -730,7 +779,7 @@ public abstract class AbstractYarnClusterDescriptor implements ClusterDescriptor
 		// setup security tokens
 		LocalResource keytabResource = null;
 		Path remotePathKeytab = null;
-		String keytab = flinkConfiguration.getString(ConfigConstants.SECURITY_KEYTAB_KEY, null);
+		String keytab = flinkConfiguration.getString(SecurityOptions.KERBEROS_LOGIN_KEYTAB);
 		if(keytab != null) {
 			LOG.info("Adding keytab {} to the AM container local resource bucket", keytab);
 			keytabResource = Records.newRecord(LocalResource.class);
@@ -773,7 +822,7 @@ public abstract class AbstractYarnClusterDescriptor implements ClusterDescriptor
 
 		if(keytabResource != null) {
 			appMasterEnv.put(YarnConfigKeys.KEYTAB_PATH, remotePathKeytab.toString() );
-			String principal = flinkConfiguration.getString(ConfigConstants.SECURITY_PRINCIPAL_KEY, null);
+			String principal = flinkConfiguration.getString(SecurityOptions.KERBEROS_LOGIN_PRINCIPAL);
 			appMasterEnv.put(YarnConfigKeys.KEYTAB_PRINCIPAL, principal );
 		}
 
@@ -807,13 +856,15 @@ public abstract class AbstractYarnClusterDescriptor implements ClusterDescriptor
 			name = customName;
 		}
 
-		appContext.setApplicationName(name); // application name
+		appContext.setApplicationName(name);
 		appContext.setApplicationType("Apache Flink");
 		appContext.setAMContainerSpec(amContainer);
 		appContext.setResource(capability);
 		if(yarnQueue != null) {
 			appContext.setQueue(yarnQueue);
 		}
+
+		setApplicationTags(appContext);
 
 		// add a hook to clean up in case deployment fails
 		Thread deploymentFailureHook = new DeploymentFailureHook(yarnClient, yarnApplication);
@@ -835,7 +886,7 @@ public abstract class AbstractYarnClusterDescriptor implements ClusterDescriptor
 			LOG.debug("Application State: {}", appState);
 			switch(appState) {
 				case FAILED:
-				case FINISHED:
+				case FINISHED: //TODO: the finished state may be valid in flip-6
 				case KILLED:
 					throw new YarnDeploymentException("The YARN application unexpectedly switched to state "
 						+ appState + " during deployment. \n" +
@@ -871,16 +922,7 @@ public abstract class AbstractYarnClusterDescriptor implements ClusterDescriptor
 		} catch (IllegalStateException e) {
 			// we're already in the shut down hook.
 		}
-
-		String host = report.getHost();
-		int port = report.getRpcPort();
-
-		// Correctly initialize the Flink config
-		flinkConfiguration.setString(ConfigConstants.JOB_MANAGER_IPC_ADDRESS_KEY, host);
-		flinkConfiguration.setInteger(ConfigConstants.JOB_MANAGER_IPC_PORT_KEY, port);
-
-		// the Flink cluster is deployed in YARN. Represent cluster
-		return createYarnClusterClient(this, yarnClient, report, flinkConfiguration, sessionFilesDir, true);
+		return report;
 	}
 
 	/**
@@ -985,75 +1027,117 @@ public abstract class AbstractYarnClusterDescriptor implements ClusterDescriptor
 		customName = name;
 	}
 
-	private void activateHighAvailabilitySupport(ApplicationSubmissionContext appContext) throws InvocationTargetException, IllegalAccessException {
+	private void activateHighAvailabilitySupport(ApplicationSubmissionContext appContext) throws
+		InvocationTargetException, IllegalAccessException {
+
 		ApplicationSubmissionContextReflector reflector = ApplicationSubmissionContextReflector.getInstance();
 
 		reflector.setKeepContainersAcrossApplicationAttempts(appContext, true);
 		reflector.setAttemptFailuresValidityInterval(appContext, AkkaUtils.getTimeout(flinkConfiguration).toMillis());
 	}
 
+	private void setApplicationTags(final ApplicationSubmissionContext appContext) throws InvocationTargetException,
+		IllegalAccessException {
+
+		final ApplicationSubmissionContextReflector reflector = ApplicationSubmissionContextReflector.getInstance();
+		final String tagsString = flinkConfiguration.getString(ConfigConstants.YARN_APPLICATION_TAGS, "");
+
+		final Set<String> applicationTags = new HashSet<>();
+
+		// Trim whitespace and cull empty tags
+		for (final String tag : tagsString.split(",")) {
+			final String trimmedTag = tag.trim();
+			if (!trimmedTag.isEmpty()) {
+				applicationTags.add(trimmedTag);
+			}
+		}
+
+		reflector.setApplicationTags(appContext, applicationTags);
+	}
+
 	/**
 	 * Singleton object which uses reflection to determine whether the {@link ApplicationSubmissionContext}
-	 * supports the setKeepContainersAcrossApplicationAttempts and the setAttemptFailuresValidityInterval
-	 * methods. Depending on the Hadoop version these methods are supported or not. If the methods
-	 * are not supported, then nothing happens when setKeepContainersAcrossApplicationAttempts or
-	 * setAttemptFailuresValidityInterval are called.
+	 * supports various methods which, depending on the Hadoop version, may or may not be supported.
+	 *
+	 * If an unsupported method is invoked, nothing happens.
+	 *
+	 * Currently three methods are proxied:
+	 * - setApplicationTags (>= 2.4.0)
+	 * - setAttemptFailuresValidityInterval (>= 2.6.0)
+	 * - setKeepContainersAcrossApplicationAttempts (>= 2.4.0)
 	 */
 	private static class ApplicationSubmissionContextReflector {
 		private static final Logger LOG = LoggerFactory.getLogger(ApplicationSubmissionContextReflector.class);
 
-		private static final ApplicationSubmissionContextReflector instance = new ApplicationSubmissionContextReflector(ApplicationSubmissionContext.class);
+		private static final ApplicationSubmissionContextReflector instance =
+			new ApplicationSubmissionContextReflector(ApplicationSubmissionContext.class);
 
 		public static ApplicationSubmissionContextReflector getInstance() {
 			return instance;
 		}
 
-		private static final String keepContainersMethodName = "setKeepContainersAcrossApplicationAttempts";
-		private static final String attemptsFailuresValidityIntervalMethodName = "setAttemptFailuresValidityInterval";
+		private static final String APPLICATION_TAGS_METHOD_NAME = "setApplicationTags";
+		private static final String ATTEMPT_FAILURES_METHOD_NAME = "setAttemptFailuresValidityInterval";
+		private static final String KEEP_CONTAINERS_METHOD_NAME = "setKeepContainersAcrossApplicationAttempts";
 
-		private final Method keepContainersMethod;
+		private final Method applicationTagsMethod;
 		private final Method attemptFailuresValidityIntervalMethod;
+		private final Method keepContainersMethod;
 
 		private ApplicationSubmissionContextReflector(Class<ApplicationSubmissionContext> clazz) {
-			Method keepContainersMethod;
+			Method applicationTagsMethod;
 			Method attemptFailuresValidityIntervalMethod;
+			Method keepContainersMethod;
 
 			try {
 				// this method is only supported by Hadoop 2.4.0 onwards
-				keepContainersMethod = clazz.getMethod(keepContainersMethodName, boolean.class);
-				LOG.debug("{} supports method {}.", clazz.getCanonicalName(), keepContainersMethodName);
+				applicationTagsMethod = clazz.getMethod(APPLICATION_TAGS_METHOD_NAME, Set.class);
+				LOG.debug("{} supports method {}.", clazz.getCanonicalName(), APPLICATION_TAGS_METHOD_NAME);
 			} catch (NoSuchMethodException e) {
-				LOG.debug("{} does not support method {}.", clazz.getCanonicalName(), keepContainersMethodName);
+				LOG.debug("{} does not support method {}.", clazz.getCanonicalName(), APPLICATION_TAGS_METHOD_NAME);
 				// assign null because the Hadoop version apparently does not support this call.
-				keepContainersMethod = null;
+				applicationTagsMethod = null;
 			}
 
-			this.keepContainersMethod = keepContainersMethod;
+			this.applicationTagsMethod = applicationTagsMethod;
 
 			try {
 				// this method is only supported by Hadoop 2.6.0 onwards
-				attemptFailuresValidityIntervalMethod = clazz.getMethod(attemptsFailuresValidityIntervalMethodName, long.class);
-				LOG.debug("{} supports method {}.", clazz.getCanonicalName(), attemptsFailuresValidityIntervalMethodName);
+				attemptFailuresValidityIntervalMethod = clazz.getMethod(ATTEMPT_FAILURES_METHOD_NAME, long.class);
+				LOG.debug("{} supports method {}.", clazz.getCanonicalName(), ATTEMPT_FAILURES_METHOD_NAME);
 			} catch (NoSuchMethodException e) {
-				LOG.debug("{} does not support method {}.", clazz.getCanonicalName(), attemptsFailuresValidityIntervalMethodName);
+				LOG.debug("{} does not support method {}.", clazz.getCanonicalName(), ATTEMPT_FAILURES_METHOD_NAME);
 				// assign null because the Hadoop version apparently does not support this call.
 				attemptFailuresValidityIntervalMethod = null;
 			}
 
 			this.attemptFailuresValidityIntervalMethod = attemptFailuresValidityIntervalMethod;
+
+			try {
+				// this method is only supported by Hadoop 2.4.0 onwards
+				keepContainersMethod = clazz.getMethod(KEEP_CONTAINERS_METHOD_NAME, boolean.class);
+				LOG.debug("{} supports method {}.", clazz.getCanonicalName(), KEEP_CONTAINERS_METHOD_NAME);
+			} catch (NoSuchMethodException e) {
+				LOG.debug("{} does not support method {}.", clazz.getCanonicalName(), KEEP_CONTAINERS_METHOD_NAME);
+				// assign null because the Hadoop version apparently does not support this call.
+				keepContainersMethod = null;
+			}
+
+			this.keepContainersMethod = keepContainersMethod;
 		}
 
-		public void setKeepContainersAcrossApplicationAttempts(
-				ApplicationSubmissionContext appContext,
-				boolean keepContainers) throws InvocationTargetException, IllegalAccessException {
-
-			if (keepContainersMethod != null) {
-				LOG.debug("Calling method {} of {}.", keepContainersMethod.getName(),
+		public void setApplicationTags(
+			ApplicationSubmissionContext appContext,
+			Set<String> applicationTags) throws InvocationTargetException, IllegalAccessException {
+			if (applicationTagsMethod != null) {
+				LOG.debug("Calling method {} of {}.",
+					applicationTagsMethod.getName(),
 					appContext.getClass().getCanonicalName());
-				keepContainersMethod.invoke(appContext, keepContainers);
+				applicationTagsMethod.invoke(appContext, applicationTags);
 			} else {
 				LOG.debug("{} does not support method {}. Doing nothing.",
-					appContext.getClass().getCanonicalName(), keepContainersMethodName);
+					appContext.getClass().getCanonicalName(),
+					APPLICATION_TAGS_METHOD_NAME);
 			}
 		}
 
@@ -1068,7 +1152,21 @@ public abstract class AbstractYarnClusterDescriptor implements ClusterDescriptor
 			} else {
 				LOG.debug("{} does not support method {}. Doing nothing.",
 					appContext.getClass().getCanonicalName(),
-					attemptsFailuresValidityIntervalMethodName);
+					ATTEMPT_FAILURES_METHOD_NAME);
+			}
+		}
+
+		public void setKeepContainersAcrossApplicationAttempts(
+			ApplicationSubmissionContext appContext,
+			boolean keepContainers) throws InvocationTargetException, IllegalAccessException {
+
+			if (keepContainersMethod != null) {
+				LOG.debug("Calling method {} of {}.", keepContainersMethod.getName(),
+					appContext.getClass().getCanonicalName());
+				keepContainersMethod.invoke(appContext, keepContainers);
+			} else {
+				LOG.debug("{} does not support method {}. Doing nothing.",
+					appContext.getClass().getCanonicalName(), KEEP_CONTAINERS_METHOD_NAME);
 			}
 		}
 	}
@@ -1135,37 +1233,52 @@ public abstract class AbstractYarnClusterDescriptor implements ClusterDescriptor
 		// ------------------ Prepare Application Master Container  ------------------------------
 
 		// respect custom JVM options in the YAML file
-		final String javaOpts = flinkConfiguration.getString(ConfigConstants.FLINK_JVM_OPTIONS, "");
+		String javaOpts = flinkConfiguration.getString(CoreOptions.FLINK_JVM_OPTIONS);
+		if (flinkConfiguration.getString(CoreOptions.FLINK_JM_JVM_OPTIONS).length() > 0) {
+			javaOpts += " " + flinkConfiguration.getString(CoreOptions.FLINK_JM_JVM_OPTIONS);
+		}
+		//applicable only for YarnMiniCluster secure test run
+		//krb5.conf file will be available as local resource in JM/TM container
+		if (hasKrb5) {
+			javaOpts += " -Djava.security.krb5.conf=krb5.conf";
+		}
 
 		// Set up the container launch context for the application master
 		ContainerLaunchContext amContainer = Records.newRecord(ContainerLaunchContext.class);
 
-		String amCommand = "$JAVA_HOME/bin/java"
-			+ " -Xmx" + Utils.calculateHeapSize(jobManagerMemoryMb, flinkConfiguration)
-			+ "M " + javaOpts;
+		final  Map<String, String> startCommandValues = new HashMap<>();
+		startCommandValues.put("java", "$JAVA_HOME/bin/java");
+		startCommandValues.put("jvmmem", "-Xmx" +
+			Utils.calculateHeapSize(jobManagerMemoryMb, flinkConfiguration) +
+			"m");
+		startCommandValues.put("jvmopts", javaOpts);
+		String logging = "";
 
 		if (hasLogback || hasLog4j) {
-			amCommand += " -Dlog.file=\"" + ApplicationConstants.LOG_DIR_EXPANSION_VAR + "/jobmanager.log\"";
+			logging = "-Dlog.file=\"" + ApplicationConstants.LOG_DIR_EXPANSION_VAR + "/jobmanager.log\"";
 
 			if(hasLogback) {
-				amCommand += " -Dlogback.configurationFile=file:" + CONFIG_FILE_LOGBACK_NAME;
+				logging += " -Dlogback.configurationFile=file:" + CONFIG_FILE_LOGBACK_NAME;
 			}
 
 			if(hasLog4j) {
-				amCommand += " -Dlog4j.configuration=file:" + CONFIG_FILE_LOG4J_NAME;
+				logging += " -Dlog4j.configuration=file:" + CONFIG_FILE_LOG4J_NAME;
 			}
 		}
 
-		//applicable only for YarnMiniCluster secure test run
-		//krb5.conf file will be available as local resource in JM/TM container
-		if(hasKrb5) {
-			amCommand += " -Djava.security.krb5.conf=krb5.conf";
-		}
+		startCommandValues.put("logging", logging);
+		startCommandValues.put("class", getApplicationMasterClass().getName());
+		startCommandValues.put("redirects",
+			"1> " + ApplicationConstants.LOG_DIR_EXPANSION_VAR + "/jobmanager.out " +
+			"2> " + ApplicationConstants.LOG_DIR_EXPANSION_VAR + "/jobmanager.err");
+		startCommandValues.put("args", "");
 
-		amCommand += " " + getApplicationMasterClass().getName() + " "
-			+ " 1>"
-			+ ApplicationConstants.LOG_DIR_EXPANSION_VAR + "/jobmanager.out"
-			+ " 2>" + ApplicationConstants.LOG_DIR_EXPANSION_VAR + "/jobmanager.err";
+		final String commandTemplate = flinkConfiguration
+			.getString(ConfigConstants.YARN_CONTAINER_START_COMMAND_TEMPLATE,
+				ConfigConstants.DEFAULT_YARN_CONTAINER_START_COMMAND_TEMPLATE);
+		final String amCommand =
+			BootstrapTools.getStartCommand(commandTemplate, startCommandValues);
+
 		amContainer.setCommands(Collections.singletonList(amCommand));
 
 		LOG.debug("Application Master start command: " + amCommand);

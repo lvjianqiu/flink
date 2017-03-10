@@ -19,11 +19,6 @@
 package org.apache.flink.runtime.jobmanager;
 
 import akka.actor.ActorSystem;
-import java.io.IOException;
-import java.net.InetSocketAddress;
-import java.util.Collections;
-import java.util.List;
-import java.util.concurrent.TimeUnit;
 import org.apache.flink.configuration.ConfigConstants;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.akka.AkkaUtils;
@@ -40,6 +35,8 @@ import org.apache.flink.runtime.jobgraph.tasks.ExternalizedCheckpointSettings;
 import org.apache.flink.runtime.jobgraph.tasks.JobSnapshottingSettings;
 import org.apache.flink.runtime.leaderretrieval.LeaderRetrievalService;
 import org.apache.flink.runtime.messages.JobManagerMessages;
+import org.apache.flink.runtime.testingUtils.TestingUtils;
+import org.apache.flink.runtime.testtasks.NoOpInvokable;
 import org.apache.flink.runtime.util.LeaderRetrievalUtils;
 import org.apache.flink.util.NetUtils;
 import org.junit.AfterClass;
@@ -50,8 +47,14 @@ import scala.concurrent.Await;
 import scala.concurrent.Future;
 import scala.concurrent.duration.FiniteDuration;
 
-import static org.junit.Assert.assertTrue;
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 /**
@@ -60,7 +63,7 @@ import static org.junit.Assert.fail;
  */
 public class JobSubmitTest {
 
-	private static final FiniteDuration timeout = new FiniteDuration(5000, TimeUnit.MILLISECONDS);
+	private static final FiniteDuration timeout = new FiniteDuration(60000, TimeUnit.MILLISECONDS);
 
 	private static ActorSystem jobManagerSystem;
 	private static ActorGateway jmGateway;
@@ -82,8 +85,8 @@ public class JobSubmitTest {
 		JobManager.startJobManagerActors(
 			jmConfig,
 			jobManagerSystem,
-			jobManagerSystem.dispatcher(),
-			jobManagerSystem.dispatcher(),
+			TestingUtils.defaultExecutor(),
+			TestingUtils.defaultExecutor(),
 			JobManager.class,
 			MemoryArchivist.class)._1();
 
@@ -112,7 +115,7 @@ public class JobSubmitTest {
 		try {
 			// create a simple job graph
 			JobVertex jobVertex = new JobVertex("Test Vertex");
-			jobVertex.setInvokableClass(Tasks.NoOpInvokable.class);
+			jobVertex.setInvokableClass(NoOpInvokable.class);
 			JobGraph jg = new JobGraph("test job", jobVertex);
 
 			// request the blob port from the job manager
@@ -170,13 +173,15 @@ public class JobSubmitTest {
 
 			JobVertex jobVertex = new JobVertex("Vertex that fails in initializeOnMaster") {
 
+				private static final long serialVersionUID = -3540303593784587652L;
+
 				@Override
 				public void initializeOnMaster(ClassLoader loader) throws Exception {
 					throw new RuntimeException("test exception");
 				}
 			};
 
-			jobVertex.setInvokableClass(Tasks.NoOpInvokable.class);
+			jobVertex.setInvokableClass(NoOpInvokable.class);
 			JobGraph jg = new JobGraph("test job", jobVertex);
 
 			// submit the job
@@ -219,12 +224,12 @@ public class JobSubmitTest {
 	private JobGraph createSimpleJobGraph() {
 		JobVertex jobVertex = new JobVertex("Vertex");
 
-		jobVertex.setInvokableClass(Tasks.NoOpInvokable.class);
+		jobVertex.setInvokableClass(NoOpInvokable.class);
 		List<JobVertexID> vertexIdList = Collections.singletonList(jobVertex.getID());
 
 		JobGraph jg = new JobGraph("test job", jobVertex);
 		jg.setSnapshotSettings(new JobSnapshottingSettings(vertexIdList, vertexIdList, vertexIdList,
-			5000, 5000, 0L, 10, ExternalizedCheckpointSettings.none()));
+			5000, 5000, 0L, 10, ExternalizedCheckpointSettings.none(), null, true));
 		return jg;
 	}
 }

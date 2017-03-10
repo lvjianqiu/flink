@@ -128,9 +128,12 @@ public class CliFrontend {
 	private static final List<CustomCommandLine> customCommandLine = new LinkedList<>();
 
 	static {
-		/** command line interface of the YARN session, with a special initialization here
-		 *  to prefix all options with y/yarn. */
+		//	Command line interface of the YARN session, with a special initialization here
+		//	to prefix all options with y/yarn.
+		//	Tips: DefaultCLI must be added at last, because getActiveCustomCommandLine(..) will get the
+		//	      active CustomCommandLine in order and DefaultCLI isActive always return true.
 		loadCustomCommandLine("org.apache.flink.yarn.cli.FlinkYarnSessionCli", "y", "yarn");
+		loadCustomCommandLine("org.apache.flink.yarn.cli.FlinkYarnCLI", "y", "yarn");
 		customCommandLine.add(new DefaultCLI());
 	}
 
@@ -837,6 +840,12 @@ public class CliFrontend {
 			return handleError(e);
 		} finally {
 			program.deleteExtractedLibraries();
+		}
+
+		if (null == result) {
+			logAndSysout("No JobSubmissionResult returned, please make sure you called " +
+				"ExecutionEnvironment.execute()");
+			return 1;
 		}
 
 		if (result.isJobExecutionResult()) {

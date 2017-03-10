@@ -97,7 +97,7 @@ public class Graph<K, VV, EV> {
 	 * @param edges a DataSet of edges.
 	 * @param context the flink execution environment.
 	 */
-	private Graph(DataSet<Vertex<K, VV>> vertices, DataSet<Edge<K, EV>> edges, ExecutionEnvironment context) {
+	protected Graph(DataSet<Vertex<K, VV>> vertices, DataSet<Edge<K, EV>> edges, ExecutionEnvironment context) {
 		this.vertices = vertices;
 		this.edges = edges;
 		this.context = context;
@@ -214,7 +214,7 @@ public class Graph<K, VV, EV> {
 		TypeInformation<K> keyType = ((TupleTypeInfo<?>) edges.getType()).getTypeAt(0);
 
 		TypeInformation<VV> valueType = TypeExtractor.createTypeInfo(
-				MapFunction.class, vertexValueInitializer.getClass(), 1, null, null);
+				MapFunction.class, vertexValueInitializer.getClass(), 1, keyType, null);
 
 		@SuppressWarnings({ "unchecked", "rawtypes" })
 		TypeInformation<Vertex<K, VV>> returnType = (TypeInformation<Vertex<K, VV>>) new TupleTypeInfo(
@@ -529,7 +529,7 @@ public class Graph<K, VV, EV> {
 
 		TypeInformation<K> keyType = ((TupleTypeInfo<?>) vertices.getType()).getTypeAt(0);
 
-		TypeInformation<NV> valueType = TypeExtractor.createTypeInfo(MapFunction.class, mapper.getClass(), 1, null, null);
+		TypeInformation<NV> valueType = TypeExtractor.createTypeInfo(MapFunction.class, mapper.getClass(), 1, vertices.getType(), null);
 
 		TypeInformation<Vertex<K, NV>> returnType = (TypeInformation<Vertex<K, NV>>) new TupleTypeInfo(
 				Vertex.class, keyType, valueType);
@@ -544,7 +544,7 @@ public class Graph<K, VV, EV> {
 	 * @param returnType the explicit return type.
 	 * @return a new graph
 	 */
-	public <NV> Graph<K, NV, EV> mapVertices(final MapFunction<Vertex<K, VV>, NV> mapper, TypeInformation<Vertex<K,NV>> returnType) {
+	public <NV> Graph<K, NV, EV> mapVertices(final MapFunction<Vertex<K, VV>, NV> mapper, TypeInformation<Vertex<K, NV>> returnType) {
 		DataSet<Vertex<K, NV>> mappedVertices = vertices.map(
 				new MapFunction<Vertex<K, VV>, Vertex<K, NV>>() {
 					private Vertex<K, NV> output = new Vertex<>();
@@ -573,7 +573,7 @@ public class Graph<K, VV, EV> {
 
 		TypeInformation<K> keyType = ((TupleTypeInfo<?>) edges.getType()).getTypeAt(0);
 
-		TypeInformation<NV> valueType = TypeExtractor.createTypeInfo(MapFunction.class, mapper.getClass(), 1, null, null);
+		TypeInformation<NV> valueType = TypeExtractor.createTypeInfo(MapFunction.class, mapper.getClass(), 1, edges.getType(), null);
 
 		TypeInformation<Edge<K, NV>> returnType = (TypeInformation<Edge<K, NV>>) new TupleTypeInfo(
 				Edge.class, keyType, keyType, valueType);
@@ -588,7 +588,7 @@ public class Graph<K, VV, EV> {
 	 * @param returnType the explicit return type.
 	 * @return a new graph
 	 */
-	public <NV> Graph<K, VV, NV> mapEdges(final MapFunction<Edge<K, EV>, NV> mapper, TypeInformation<Edge<K,NV>> returnType) {
+	public <NV> Graph<K, VV, NV> mapEdges(final MapFunction<Edge<K, EV>, NV> mapper, TypeInformation<Edge<K, NV>> returnType) {
 		DataSet<Edge<K, NV>> mappedEdges = edges.map(
 			new MapFunction<Edge<K, EV>, Edge<K, NV>>() {
 				private Edge<K, NV> output = new Edge<>();
@@ -924,7 +924,7 @@ public class Graph<K, VV, EV> {
 		private Tuple2<K, LongValue> vertexDegree = new Tuple2<>(null, degree);
 
 		@SuppressWarnings("unused")
-		public void coGroup(Iterable<Vertex<K, VV>> vertex,	Iterable<Edge<K, EV>> outEdges,
+		public void coGroup(Iterable<Vertex<K, VV>> vertex, Iterable<Edge<K, EV>> outEdges,
 				Collector<Tuple2<K, LongValue>> out) {
 			long count = 0;
 			for (Edge<K, EV> edge : outEdges) {
@@ -1002,7 +1002,7 @@ public class Graph<K, VV, EV> {
 			return vertices.coGroup(edges).where(0).equalTo(0)
 					.with(new ApplyCoGroupFunction<>(edgesFunction)).name("GroupReduce on out-edges");
 		case ALL:
-			return vertices.coGroup(edges.flatMap(new EmitOneEdgePerNode<K, VV, EV>())
+			return vertices.coGroup(edges.flatMap(new EmitOneEdgePerNode<K, EV>())
 						.name("Emit edge"))
 					.where(0).equalTo(0).with(new ApplyCoGroupFunctionOnAllEdges<>(edgesFunction))
 						.name("GroupReduce on in- and out-edges");
@@ -1039,7 +1039,7 @@ public class Graph<K, VV, EV> {
 						.with(new ApplyCoGroupFunction<>(edgesFunction))
 							.name("GroupReduce on out-edges").returns(typeInfo);
 			case ALL:
-				return vertices.coGroup(edges.flatMap(new EmitOneEdgePerNode<K, VV, EV>())
+				return vertices.coGroup(edges.flatMap(new EmitOneEdgePerNode<K, EV>())
 							.name("Emit edge"))
 						.where(0).equalTo(0).with(new ApplyCoGroupFunctionOnAllEdges<>(edgesFunction))
 							.name("GroupReduce on in- and out-edges").returns(typeInfo);
@@ -1065,24 +1065,12 @@ public class Graph<K, VV, EV> {
 	public <T> DataSet<T> groupReduceOnEdges(EdgesFunction<K, EV, T> edgesFunction,
 			EdgeDirection direction) throws IllegalArgumentException {
 
-		switch (direction) {
-		case IN:
-			return edges.map(new ProjectVertexIdMap<K, EV>(1))
-					.withForwardedFields("f1->f0").name("Vertex ID")
-					.groupBy(0).reduceGroup(new ApplyGroupReduceFunction<>(edgesFunction))
-						.name("GroupReduce on in-edges");
-		case OUT:
-			return edges.map(new ProjectVertexIdMap<K, EV>(0))
-					.withForwardedFields("f0").name("Vertex ID")
-					.groupBy(0).reduceGroup(new ApplyGroupReduceFunction<>(edgesFunction))
-						.name("GroupReduce on out-edges");
-		case ALL:
-			return edges.flatMap(new EmitOneEdgePerNode<K, VV, EV>()).name("Emit edge")
-				.groupBy(0).reduceGroup(new ApplyGroupReduceFunction<>(edgesFunction))
-					.name("GroupReduce on in- and out-edges");
-		default:
-			throw new IllegalArgumentException("Illegal edge direction");
-		}
+		TypeInformation<K> keyType = ((TupleTypeInfo<?>) vertices.getType()).getTypeAt(0);
+		TypeInformation<EV> edgeValueType = ((TupleTypeInfo<?>) edges.getType()).getTypeAt(2);
+		TypeInformation<T> returnType = TypeExtractor.createTypeInfo(EdgesFunction.class, edgesFunction.getClass(), 2,
+			keyType, edgeValueType);
+
+		return groupReduceOnEdges(edgesFunction, direction, returnType);
 	}
 
 	/**
@@ -1115,7 +1103,7 @@ public class Graph<K, VV, EV> {
 						.groupBy(0).reduceGroup(new ApplyGroupReduceFunction<>(edgesFunction))
 							.name("GroupReduce on out-edges").returns(typeInfo);
 			case ALL:
-				return edges.flatMap(new EmitOneEdgePerNode<K, VV, EV>()).name("Emit edge")
+				return edges.flatMap(new EmitOneEdgePerNode<K, EV>()).name("Emit edge")
 						.groupBy(0).reduceGroup(new ApplyGroupReduceFunction<>(edgesFunction))
 							.name("GroupReduce on in- and out-edges").returns(typeInfo);
 			default:
@@ -1138,7 +1126,7 @@ public class Graph<K, VV, EV> {
 		}
 	}
 
-	private static final class ProjectVertexWithEdgeValueMap<K, EV>	implements MapFunction<
+	private static final class ProjectVertexWithEdgeValueMap<K, EV> implements MapFunction<
 		Edge<K, EV>, Tuple2<K, EV>> {
 
 		private int fieldPosition;
@@ -1153,8 +1141,7 @@ public class Graph<K, VV, EV> {
 		}
 	}
 
-	private static final class ApplyGroupReduceFunction<K, EV, T> implements GroupReduceFunction<
-		Tuple2<K, Edge<K, EV>>, T>,	ResultTypeQueryable<T> {
+	private static final class ApplyGroupReduceFunction<K, EV, T> implements GroupReduceFunction<Tuple2<K, Edge<K, EV>>, T> {
 
 		private EdgesFunction<K, EV, T> function;
 
@@ -1165,14 +1152,9 @@ public class Graph<K, VV, EV> {
 		public void reduce(Iterable<Tuple2<K, Edge<K, EV>>> edges, Collector<T> out) throws Exception {
 			function.iterateEdges(edges, out);
 		}
-
-		@Override
-		public TypeInformation<T> getProducedType() {
-			return TypeExtractor.createTypeInfo(EdgesFunction.class, function.getClass(), 2, null, null);
-		}
 	}
 
-	private static final class EmitOneEdgePerNode<K, VV, EV> implements FlatMapFunction<
+	private static final class EmitOneEdgePerNode<K, EV> implements FlatMapFunction<
 		Edge<K, EV>, Tuple2<K, Edge<K, EV>>> {
 
 		public void flatMap(Edge<K, EV> edge, Collector<Tuple2<K, Edge<K, EV>>> out) {
@@ -1219,7 +1201,6 @@ public class Graph<K, VV, EV> {
 				throw new NoSuchElementException("The edge src/trg id could not be found within the vertexIds");
 			}
 		}
-
 		@Override
 		public TypeInformation<T> getProducedType() {
 			return TypeExtractor.createTypeInfo(EdgesFunctionWithVertexValue.class, function.getClass(), 3,
@@ -1236,7 +1217,7 @@ public class Graph<K, VV, EV> {
 			this.function = fun;
 		}
 
-		public void coGroup(Iterable<Vertex<K, VV>> vertex,	final Iterable<Tuple2<K, Edge<K, EV>>> keysWithEdges,
+		public void coGroup(Iterable<Vertex<K, VV>> vertex, final Iterable<Tuple2<K, Edge<K, EV>>> keysWithEdges,
 				Collector<T> out) throws Exception {
 
 			final Iterator<Edge<K, EV>> edgesIterator = new Iterator<Edge<K, EV>>() {
@@ -1435,9 +1416,9 @@ public class Graph<K, VV, EV> {
 	 */
 	public Graph<K, VV, EV> addEdges(List<Edge<K, EV>> newEdges) {
 
-		DataSet<Edge<K,EV>> newEdgesDataSet = this.context.fromCollection(newEdges);
+		DataSet<Edge<K, EV>> newEdgesDataSet = this.context.fromCollection(newEdges);
 
-		DataSet<Edge<K,EV>> validNewEdges = this.getVertices().join(newEdgesDataSet)
+		DataSet<Edge<K, EV>> validNewEdges = this.getVertices().join(newEdgesDataSet)
 				.where(0).equalTo(0)
 				.with(new JoinVerticesWithEdgesOnSrc<K, VV, EV>()).name("Join with source")
 				.join(this.getVertices()).where(1).equalTo(0)
@@ -1535,7 +1516,7 @@ public class Graph<K, VV, EV> {
 	}
 
 	@ForwardedFieldsSecond("f0; f1; f2")
-	private static final class ProjectEdgeToBeRemoved<K,VV,EV> implements JoinFunction<Vertex<K, VV>, Edge<K, EV>, Edge<K, EV>> {
+	private static final class ProjectEdgeToBeRemoved<K, VV, EV> implements JoinFunction<Vertex<K, VV>, Edge<K, EV>, Edge<K, EV>> {
 		@Override
 		public Edge<K, EV> join(Vertex<K, VV> vertex, Edge<K, EV> edge) throws Exception {
 			return edge;
@@ -1578,12 +1559,12 @@ public class Graph<K, VV, EV> {
 	public Graph<K, VV, EV> removeEdges(List<Edge<K, EV>> edgesToBeRemoved) {
 
 		DataSet<Edge<K, EV>> newEdges = getEdges().coGroup(this.context.fromCollection(edgesToBeRemoved))
-				.where(0,1).equalTo(0,1).with(new EdgeRemovalCoGroup<K, EV>()).name("Remove edges");
+				.where(0, 1).equalTo(0, 1).with(new EdgeRemovalCoGroup<K, EV>()).name("Remove edges");
 
 		return new Graph<>(this.vertices, newEdges, context);
 	}
 
-	private static final class EdgeRemovalCoGroup<K,EV> implements CoGroupFunction<Edge<K, EV>, Edge<K, EV>, Edge<K, EV>> {
+	private static final class EdgeRemovalCoGroup<K, EV> implements CoGroupFunction<Edge<K, EV>, Edge<K, EV>, Edge<K, EV>> {
 
 		@Override
 		public void coGroup(Iterable<Edge<K, EV>> edge, Iterable<Edge<K, EV>> edgeToBeRemoved,
@@ -1627,8 +1608,8 @@ public class Graph<K, VV, EV> {
 	 * @param graph the graph to perform difference with
 	 * @return a new graph where the common vertices and edges have been removed
 	 */
-	public Graph<K,VV,EV> difference(Graph<K,VV,EV> graph) {
-		DataSet<Vertex<K,VV>> removeVerticesData = graph.getVertices();
+	public Graph<K, VV, EV> difference(Graph<K, VV, EV> graph) {
+		DataSet<Vertex<K, VV>> removeVerticesData = graph.getVertices();
 		return this.removeVertices(removeVerticesData);
 	}
 
@@ -1707,7 +1688,7 @@ public class Graph<K, VV, EV> {
 	 * @param <EV> 	edge value type
 	 */
 	private static final class MatchingEdgeReducer<K, EV>
-			implements CoGroupFunction<Edge<K,EV>, Edge<K,EV>, Edge<K, EV>> {
+			implements CoGroupFunction<Edge<K, EV>, Edge<K, EV>, Edge<K, EV>> {
 
 		@Override
 		public void coGroup(Iterable<Edge<K, EV>> edgesLeft, Iterable<Edge<K, EV>> edgesRight, Collector<Edge<K, EV>> out)
@@ -2168,12 +2149,12 @@ public class Graph<K, VV, EV> {
 
 		public void coGroup(Iterable<Vertex<K, VV>> vertex, Iterable<Tuple2<Edge<K, EV>, Vertex<K, VV>>> neighbors,
 				Collector<T> out) throws Exception {
-			function.iterateNeighbors(vertex.iterator().next(),	neighbors, out);
+			function.iterateNeighbors(vertex.iterator().next(), neighbors, out);
 		}
 
 		@Override
 		public TypeInformation<T> getProducedType() {
-			return TypeExtractor.createTypeInfo(NeighborsFunctionWithVertexValue.class,	function.getClass(), 3, null, null);
+			return TypeExtractor.createTypeInfo(NeighborsFunctionWithVertexValue.class, function.getClass(), 3, null, null);
 		}
 	}
 
@@ -2228,7 +2209,7 @@ public class Graph<K, VV, EV> {
 
 		@Override
 		public TypeInformation<T> getProducedType() {
-			return TypeExtractor.createTypeInfo(NeighborsFunctionWithVertexValue.class,	function.getClass(), 3, null, null);
+			return TypeExtractor.createTypeInfo(NeighborsFunctionWithVertexValue.class, function.getClass(), 3, null, null);
 		}
 	}
 

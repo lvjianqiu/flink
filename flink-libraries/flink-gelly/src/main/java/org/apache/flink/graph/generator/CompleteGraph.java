@@ -29,12 +29,15 @@ import org.apache.flink.types.LongValue;
 import org.apache.flink.types.NullValue;
 import org.apache.flink.util.Collector;
 import org.apache.flink.util.LongValueSequenceIterator;
+import org.apache.flink.util.Preconditions;
 
 /*
  * @see <a href="http://mathworld.wolfram.com/CompleteGraph.html">Complete Graph at Wolfram MathWorld</a>
  */
 public class CompleteGraph
 extends AbstractGraphGenerator<LongValue, NullValue, NullValue> {
+
+	public static final int MINIMUM_VERTEX_COUNT = 2;
 
 	// Required to create the DataSource
 	private final ExecutionEnvironment env;
@@ -49,23 +52,22 @@ extends AbstractGraphGenerator<LongValue, NullValue, NullValue> {
 	 * @param vertexCount number of vertices
 	 */
 	public CompleteGraph(ExecutionEnvironment env, long vertexCount) {
-		if (vertexCount <= 0) {
-			throw new IllegalArgumentException("Vertex count must be greater than zero");
-		}
+		Preconditions.checkArgument(vertexCount >= MINIMUM_VERTEX_COUNT,
+			"Vertex count must be at least " + MINIMUM_VERTEX_COUNT);
 
 		this.env = env;
 		this.vertexCount = vertexCount;
 	}
 
 	@Override
-	public Graph<LongValue,NullValue,NullValue> generate() {
+	public Graph<LongValue, NullValue, NullValue> generate() {
 		// Vertices
-		DataSet<Vertex<LongValue,NullValue>> vertices = GraphGeneratorUtils.vertexSequence(env, parallelism, vertexCount);
+		DataSet<Vertex<LongValue, NullValue>> vertices = GraphGeneratorUtils.vertexSequence(env, parallelism, vertexCount);
 
 		// Edges
 		LongValueSequenceIterator iterator = new LongValueSequenceIterator(0, this.vertexCount - 1);
 
-		DataSet<Edge<LongValue,NullValue>> edges = env
+		DataSet<Edge<LongValue, NullValue>> edges = env
 			.fromParallelCollection(iterator, LongValue.class)
 				.setParallelism(parallelism)
 				.name("Edge iterators")
@@ -79,20 +81,20 @@ extends AbstractGraphGenerator<LongValue, NullValue, NullValue> {
 
 	@ForwardedFields("*->f0")
 	public class LinkVertexToAll
-	implements FlatMapFunction<LongValue, Edge<LongValue,NullValue>> {
+	implements FlatMapFunction<LongValue, Edge<LongValue, NullValue>> {
 
 		private final long vertexCount;
 
 		private LongValue target = new LongValue();
 
-		private Edge<LongValue,NullValue> edge = new Edge<>(null, target, NullValue.getInstance());
+		private Edge<LongValue, NullValue> edge = new Edge<>(null, target, NullValue.getInstance());
 
 		public LinkVertexToAll(long vertex_count) {
 			this.vertexCount = vertex_count;
 		}
 
 		@Override
-		public void flatMap(LongValue source, Collector<Edge<LongValue,NullValue>> out)
+		public void flatMap(LongValue source, Collector<Edge<LongValue, NullValue>> out)
 				throws Exception {
 			edge.f0 = source;
 

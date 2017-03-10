@@ -39,13 +39,14 @@ import org.apache.flink.runtime.blob.BlobServer;
 import org.apache.flink.runtime.blob.BlobService;
 import org.apache.flink.runtime.checkpoint.CheckpointIDCounter;
 import org.apache.flink.runtime.checkpoint.CheckpointMetaData;
+import org.apache.flink.runtime.checkpoint.CheckpointMetrics;
+import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.checkpoint.CheckpointRecoveryFactory;
 import org.apache.flink.runtime.checkpoint.CompletedCheckpoint;
 import org.apache.flink.runtime.checkpoint.CompletedCheckpointStore;
 import org.apache.flink.runtime.checkpoint.StandaloneCheckpointIDCounter;
 import org.apache.flink.runtime.checkpoint.SubtaskState;
 import org.apache.flink.runtime.clusterframework.types.ResourceID;
-import org.apache.flink.runtime.concurrent.Executors;
 import org.apache.flink.runtime.execution.librarycache.BlobLibraryCacheManager;
 import org.apache.flink.runtime.executiongraph.restart.FixedDelayRestartStrategy;
 import org.apache.flink.runtime.executiongraph.restart.RestartStrategyFactory;
@@ -80,11 +81,13 @@ import org.apache.flink.runtime.testingUtils.TestingTaskManagerMessages;
 import org.apache.flink.runtime.testingUtils.TestingUtils;
 import org.apache.flink.runtime.util.TestByteStreamStateHandleDeepCompare;
 import org.apache.flink.util.InstantiationUtil;
+
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+
 import scala.Int;
 import scala.Option;
 import scala.PartialFunction;
@@ -105,8 +108,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 import static org.hamcrest.Matchers.containsInAnyOrder;
@@ -156,8 +158,6 @@ public class JobManagerHARecoveryTest {
 		flinkConfiguration.setString(HighAvailabilityOptions.HA_STORAGE_PATH, temporaryFolder.newFolder().toString());
 		flinkConfiguration.setInteger(ConfigConstants.TASK_MANAGER_NUM_TASK_SLOTS, slots);
 
-		ExecutorService executor = null;
-
 		try {
 			Scheduler scheduler = new Scheduler(TestingUtils.defaultExecutionContext());
 
@@ -171,17 +171,13 @@ public class JobManagerHARecoveryTest {
 			InstanceManager instanceManager = new InstanceManager();
 			instanceManager.addInstanceListener(scheduler);
 
-			archive = system.actorOf(Props.create(
-					MemoryArchivist.class,
-					10), "archive");
-
-			executor = new ForkJoinPool();
+			archive = system.actorOf(Props.create(MemoryArchivist.class, 10));
 
 			Props jobManagerProps = Props.create(
 				TestingJobManager.class,
 				flinkConfiguration,
-				executor,
-				executor,
+				TestingUtils.defaultExecutor(),
+				TestingUtils.defaultExecutor(),
 				instanceManager,
 				scheduler,
 				new BlobLibraryCacheManager(new BlobServer(flinkConfiguration), 3600000),
@@ -194,7 +190,7 @@ public class JobManagerHARecoveryTest {
 				jobRecoveryTimeout,
 				Option.apply(null));
 
-			jobManager = system.actorOf(jobManagerProps, "jobmanager");
+			jobManager = system.actorOf(jobManagerProps);
 			ActorGateway gateway = new AkkaActorGateway(jobManager, leaderSessionID);
 
 			taskManager = TaskManager.startTaskManagerComponentsAndActor(
@@ -228,7 +224,9 @@ public class JobManagerHARecoveryTest {
 					10 * 60 * 1000,
 					0,
 					1,
-					ExternalizedCheckpointSettings.none()));
+					ExternalizedCheckpointSettings.none(),
+					null,
+					true));
 
 			BlockingStatefulInvokable.initializeStaticHelpers(slots);
 
@@ -308,10 +306,6 @@ public class JobManagerHARecoveryTest {
 			if (taskManager != null) {
 				taskManager.tell(PoisonPill.getInstance(), ActorRef.noSender());
 			}
-
-			if (executor != null) {
-				executor.shutdownNow();
-			}
 		}
 	}
 
@@ -352,8 +346,8 @@ public class JobManagerHARecoveryTest {
 			Props jobManagerProps = Props.create(
 				TestingFailingHAJobManager.class,
 				flinkConfiguration,
-				Executors.directExecutor(),
-				Executors.directExecutor(),
+				TestingUtils.defaultExecutor(),
+				TestingUtils.defaultExecutor(),
 				mock(InstanceManager.class),
 				mock(Scheduler.class),
 				new BlobLibraryCacheManager(mock(BlobService.class), 1 << 20),
@@ -367,7 +361,7 @@ public class JobManagerHARecoveryTest {
 				Option.<MetricRegistry>apply(null),
 				recoveredJobs).withDispatcher(CallingThreadDispatcher.Id());
 
-			jobManager = system.actorOf(jobManagerProps, "jobmanager");
+			jobManager = system.actorOf(jobManagerProps);
 
 			Future<Object> started = Patterns.ask(jobManager, new Identify(42), deadline.timeLeft().toMillis());
 
@@ -389,7 +383,7 @@ public class JobManagerHARecoveryTest {
 
 		public TestingFailingHAJobManager(
 			Configuration flinkConfiguration,
-			Executor futureExecutor,
+			ScheduledExecutorService futureExecutor,
 			Executor ioExecutor,
 			InstanceManager instanceManager,
 			Scheduler scheduler,
@@ -490,6 +484,10 @@ public class JobManagerHARecoveryTest {
 			return checkpoints.size();
 		}
 
+		@Override
+		public boolean requiresExternalizedCheckpoints() {
+			return false;
+		}
 	}
 
 	static class MyCheckpointRecoveryFactory implements CheckpointRecoveryFactory {
@@ -609,7 +607,7 @@ public class JobManagerHARecoveryTest {
 		}
 
 		@Override
-		public boolean triggerCheckpoint(CheckpointMetaData checkpointMetaData) throws Exception {
+		public boolean triggerCheckpoint(CheckpointMetaData checkpointMetaData, CheckpointOptions checkpointOptions) throws Exception {
 			ByteStreamStateHandle byteStreamStateHandle = new TestByteStreamStateHandleDeepCompare(
 					String.valueOf(UUID.randomUUID()),
 					InstantiationUtil.serializeObject(checkpointMetaData.getCheckpointId()));
@@ -617,16 +615,17 @@ public class JobManagerHARecoveryTest {
 			ChainedStateHandle<StreamStateHandle> chainedStateHandle =
 					new ChainedStateHandle<StreamStateHandle>(Collections.singletonList(byteStreamStateHandle));
 			SubtaskState checkpointStateHandles =
-					new SubtaskState(chainedStateHandle, null, null, null, null, 0L);
+					new SubtaskState(chainedStateHandle, null, null, null, null);
 
 			getEnvironment().acknowledgeCheckpoint(
-					new CheckpointMetaData(checkpointMetaData.getCheckpointId(), -1, 0L, 0L, 0L, 0L),
+					checkpointMetaData.getCheckpointId(),
+					new CheckpointMetrics(0L, 0L, 0L, 0L),
 					checkpointStateHandles);
 			return true;
 		}
 
 		@Override
-		public void triggerCheckpointOnBarrier(CheckpointMetaData checkpointMetaData) throws Exception {
+		public void triggerCheckpointOnBarrier(CheckpointMetaData checkpointMetaData, CheckpointOptions checkpointOptions, CheckpointMetrics checkpointMetrics) throws Exception {
 			throw new UnsupportedOperationException("should not be called!");
 		}
 

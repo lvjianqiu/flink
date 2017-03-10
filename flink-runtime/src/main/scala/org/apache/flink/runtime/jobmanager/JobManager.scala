@@ -18,7 +18,7 @@
 
 package org.apache.flink.runtime.jobmanager
 
-import java.io.{File, IOException}
+import java.io.IOException
 import java.net._
 import java.util.UUID
 import java.util.concurrent.{TimeUnit, Future => _, TimeoutException => _, _}
@@ -29,7 +29,7 @@ import akka.pattern.ask
 import grizzled.slf4j.Logger
 import org.apache.flink.api.common.JobID
 import org.apache.flink.api.common.time.Time
-import org.apache.flink.configuration.{ConfigConstants, Configuration, GlobalConfiguration, HighAvailabilityOptions}
+import org.apache.flink.configuration._
 import org.apache.flink.core.fs.FileSystem
 import org.apache.flink.core.io.InputSplitAssigner
 import org.apache.flink.metrics.groups.UnregisteredMetricsGroup
@@ -50,7 +50,7 @@ import org.apache.flink.runtime.execution.librarycache.BlobLibraryCacheManager
 import org.apache.flink.runtime.executiongraph.restart.RestartStrategyFactory
 import org.apache.flink.runtime.executiongraph._
 import org.apache.flink.runtime.instance.{AkkaActorGateway, InstanceID, InstanceManager}
-import org.apache.flink.runtime.jobgraph.{JobGraph, JobStatus, JobVertexID}
+import org.apache.flink.runtime.jobgraph.{JobGraph, JobStatus}
 import org.apache.flink.runtime.jobmanager.SubmittedJobGraphStore.SubmittedJobGraphListener
 import org.apache.flink.runtime.jobmanager.scheduler.{Scheduler => FlinkScheduler}
 import org.apache.flink.runtime.jobmanager.slots.ActorTaskManagerGateway
@@ -77,7 +77,7 @@ import org.apache.flink.runtime.security.SecurityUtils.SecurityConfiguration
 import org.apache.flink.runtime.taskmanager.TaskManager
 import org.apache.flink.runtime.util._
 import org.apache.flink.runtime.webmonitor.{WebMonitor, WebMonitorUtils}
-import org.apache.flink.runtime.{FlinkActor, JobException, LeaderSessionMessageFilter, LogMessages}
+import org.apache.flink.runtime.{FlinkActor, LeaderSessionMessageFilter, LogMessages}
 import org.apache.flink.util.{ConfigurationUtil, InstantiationUtil, NetUtils}
 import org.jboss.netty.channel.ChannelException
 
@@ -117,7 +117,7 @@ import scala.language.postfixOps
  */
 class JobManager(
     protected val flinkConfiguration: Configuration,
-    protected val futureExecutor: Executor,
+    protected val futureExecutor: ScheduledExecutorService,
     protected val ioExecutor: Executor,
     protected val instanceManager: InstanceManager,
     protected val scheduler: FlinkScheduler,
@@ -149,7 +149,7 @@ class JobManager(
     case Some(registry) =>
       val host = flinkConfiguration.getString(ConfigConstants.JOB_MANAGER_IPC_ADDRESS_KEY, null)
       Option(new JobManagerMetricGroup(
-        registry, NetUtils.ipAddressToUrlString(InetAddress.getByName(host))))
+        registry, NetUtils.unresolvedHostToNormalizedString(host)))
     case None =>
       log.warn("Could not instantiate JobManager metrics.")
       None
@@ -586,44 +586,54 @@ class JobManager(
           defaultSavepointDir
         }
 
-        log.info(s"Trying to cancel job $jobId with savepoint to $targetDirectory")
+        if (targetDirectory == null) {
+          log.info(s"Trying to cancel job $jobId with savepoint, but no " +
+            "savepoint directory configured.")
 
-        currentJobs.get(jobId) match {
-          case Some((executionGraph, _)) =>
-            // We don't want any checkpoint between the savepoint and cancellation
-            val coord = executionGraph.getCheckpointCoordinator
-            coord.stopCheckpointScheduler()
+          sender ! decorateMessage(CancellationFailure(jobId, new IllegalStateException(
+            "No savepoint directory configured. You can either specify a directory " +
+              "while cancelling via -s :targetDirectory or configure a cluster-wide " +
+              "default via key '" + ConfigConstants.SAVEPOINT_DIRECTORY_KEY + "'.")))
+        } else {
+          log.info(s"Trying to cancel job $jobId with savepoint to $targetDirectory")
 
-            // Trigger the savepoint
-            val future = coord.triggerSavepoint(System.currentTimeMillis(), targetDirectory)
+          currentJobs.get(jobId) match {
+            case Some((executionGraph, _)) =>
+              // We don't want any checkpoint between the savepoint and cancellation
+              val coord = executionGraph.getCheckpointCoordinator
+              coord.stopCheckpointScheduler()
 
-            val senderRef = sender()
-            future.handleAsync[Void](
-              new BiFunction[CompletedCheckpoint, Throwable, Void] {
-                override def apply(success: CompletedCheckpoint, cause: Throwable): Void = {
-                  if (success != null) {
-                    val path = success.getExternalPath()
-                    log.info(s"Savepoint stored in $path. Now cancelling $jobId.")
-                    executionGraph.cancel()
-                    senderRef ! decorateMessage(CancellationSuccess(jobId, path))
-                  } else {
-                    val msg = CancellationFailure(
-                      jobId,
-                      new Exception("Failed to trigger savepoint.", cause))
-                    senderRef ! decorateMessage(msg)
+              // Trigger the savepoint
+              val future = coord.triggerSavepoint(System.currentTimeMillis(), targetDirectory)
+
+              val senderRef = sender()
+              future.handleAsync[Void](
+                new BiFunction[CompletedCheckpoint, Throwable, Void] {
+                  override def apply(success: CompletedCheckpoint, cause: Throwable): Void = {
+                    if (success != null) {
+                      val path = success.getExternalPointer()
+                      log.info(s"Savepoint stored in $path. Now cancelling $jobId.")
+                      executionGraph.cancel()
+                      senderRef ! decorateMessage(CancellationSuccess(jobId, path))
+                    } else {
+                      val msg = CancellationFailure(
+                        jobId,
+                        new Exception("Failed to trigger savepoint.", cause))
+                      senderRef ! decorateMessage(msg)
+                    }
+                    null
                   }
-                  null
-                }
-              },
-              context.dispatcher)
+                },
+                context.dispatcher)
 
-          case None =>
-            log.info(s"No job found with ID $jobId.")
-            sender ! decorateMessage(
-              CancellationFailure(
-                jobId,
-                new IllegalArgumentException(s"No job found with ID $jobId."))
-            )
+            case None =>
+              log.info(s"No job found with ID $jobId.")
+              sender ! decorateMessage(
+                CancellationFailure(
+                  jobId,
+                  new IllegalArgumentException(s"No job found with ID $jobId."))
+              )
+          }
         }
       } catch {
         case t: Throwable =>
@@ -777,8 +787,13 @@ class JobManager(
                 new BiFunction[CompletedCheckpoint, Throwable, Void] {
                   override def apply(success: CompletedCheckpoint, cause: Throwable): Void = {
                     if (success != null) {
-                      if (success.getExternalPath != null) {
-                        senderRef ! TriggerSavepointSuccess(jobId, success.getExternalPath)
+                      if (success.getExternalPointer != null) {
+                        senderRef ! TriggerSavepointSuccess(
+                          jobId,
+                          success.getCheckpointID,
+                          success.getExternalPointer,
+                          success.getTimestamp
+                        )
                       } else {
                         senderRef ! TriggerSavepointFailure(
                           jobId, new Exception("Savepoint has not been persisted."))
@@ -822,7 +837,7 @@ class JobManager(
           savepoint.dispose()
 
           // Remove the header file
-          SavepointStore.removeSavepoint(savepointPath)
+          SavepointStore.removeSavepointFile(savepointPath)
 
           senderRef ! DisposeSavepointSuccess
         } catch {
@@ -1277,6 +1292,7 @@ class JobManager(
           flinkConfiguration,
           futureExecutor,
           ioExecutor,
+          scheduler,
           userCodeLoader,
           checkpointRecoveryFactory,
           Time.of(timeout.length, timeout.unit),
@@ -1395,7 +1411,7 @@ class JobManager(
             // the job.
             log.info(s"Scheduling job $jobId ($jobName).")
 
-            executionGraph.scheduleForExecution(scheduler)
+            executionGraph.scheduleForExecution()
           } else {
             // Remove the job graph. Otherwise it will be lingering around and possibly removed from
             // ZooKeeper by this JM.
@@ -1769,7 +1785,7 @@ class JobManager(
       case t: Throwable =>
         log.error(s"Could not properly unregister job $jobID form the library cache.", t)
     }
-    jobManagerMetricGroup.map(_.removeJob(jobID))
+    jobManagerMetricGroup.foreach(_.removeJob(jobID))
 
     futureOption
   }
@@ -1844,18 +1860,19 @@ class JobManager(
    *
    * @param accumulators list of accumulator snapshots
    */
-  private def updateAccumulators(accumulators : Seq[AccumulatorSnapshot]) = {
-    accumulators foreach {
-      case accumulatorEvent =>
-        currentJobs.get(accumulatorEvent.getJobID) match {
-          case Some((jobGraph, jobInfo)) =>
-            future {
-              jobGraph.updateAccumulators(accumulatorEvent)
-            }(context.dispatcher)
-          case None =>
-          // ignore accumulator values for old job
+  private def updateAccumulators(accumulators : Seq[AccumulatorSnapshot]): Unit = {
+    accumulators.foreach( snapshot => {
+        if (snapshot != null) {
+          currentJobs.get(snapshot.getJobID) match {
+            case Some((jobGraph, jobInfo)) =>
+              future {
+                jobGraph.updateAccumulators(snapshot)
+              }(context.dispatcher)
+            case None =>
+              // ignore accumulator values for old job
+          }
         }
-    }
+    })
   }
 
   /**
@@ -1923,8 +1940,8 @@ object JobManager {
     // parsing the command line arguments
     val (configuration: Configuration,
          executionMode: JobManagerMode,
-         listeningHost: String,
-         listeningPortRange: java.util.Iterator[Integer]) =
+         externalHostName: String,
+         portRange: java.util.Iterator[Integer]) =
     try {
       parseArgs(args)
     }
@@ -1939,14 +1956,14 @@ object JobManager {
     // we want to check that the JobManager hostname is in the config
     // if it is not in there, the actor system will bind to the loopback interface's
     // address and will not be reachable from anyone remote
-    if (listeningHost == null) {
+    if (externalHostName == null) {
       val message = "Config parameter '" + ConfigConstants.JOB_MANAGER_IPC_ADDRESS_KEY +
         "' is missing (hostname/address to bind JobManager to)."
       LOG.error(message)
       System.exit(STARTUP_FAILURE_RETURN_CODE)
     }
 
-    if (!listeningPortRange.hasNext) {
+    if (!portRange.hasNext) {
       if (ZooKeeperUtils.isZooKeeperRecoveryMode(configuration)) {
         val message = "Config parameter '" + ConfigConstants.HA_JOB_MANAGER_PORT +
           "' does not specify a valid port range."
@@ -1954,7 +1971,7 @@ object JobManager {
         System.exit(STARTUP_FAILURE_RETURN_CODE)
       }
       else {
-        val message = s"Config parameter '" + ConfigConstants.JOB_MANAGER_IPC_PORT_KEY +
+        val message = s"Config parameter '" + ConfigConstants.JOB_MANAGER_IPC_ADDRESS_KEY +
           "' does not specify a valid port."
         LOG.error(message)
         System.exit(STARTUP_FAILURE_RETURN_CODE)
@@ -1970,8 +1987,8 @@ object JobManager {
           runJobManager(
             configuration,
             executionMode,
-            listeningHost,
-            listeningPortRange)
+            externalHostName,
+            portRange)
         }
       })
     } catch {
@@ -2005,13 +2022,13 @@ object JobManager {
 
     val numberProcessors = Hardware.getNumberCPUCores()
 
-    val futureExecutor = Executors.newFixedThreadPool(
+    val futureExecutor = Executors.newScheduledThreadPool(
       numberProcessors,
-      new NamedThreadFactory("jobmanager-future-", "-thread-"))
+      new ExecutorThreadFactory("jobmanager-future"))
 
     val ioExecutor = Executors.newFixedThreadPool(
       numberProcessors,
-      new NamedThreadFactory("jobmanager-io-", "-thread-"))
+      new ExecutorThreadFactory("jobmanager-io"))
 
     val timeout = AkkaUtils.getTimeout(configuration)
 
@@ -2080,7 +2097,7 @@ object JobManager {
           override def createSocket(port: Int): ServerSocket = new ServerSocket(
             // Use the correct listening address, bound ports will only be
             // detected later by Akka.
-            port, 0, InetAddress.getByName(listeningAddress))
+            port, 0, InetAddress.getByName(NetUtils.getWildcardIPAddress))
         })
 
       val port =
@@ -2158,8 +2175,8 @@ object JobManager {
     * @param configuration The configuration object for the JobManager
     * @param executionMode The execution mode in which to run. Execution mode LOCAL with spawn an
     *                      additional TaskManager in the same process.
-    * @param listeningAddress The hostname where the JobManager should listen for messages.
-    * @param listeningPort The port where the JobManager should listen for messages
+    * @param externalHostname The hostname where the JobManager is reachable for rpc communication
+    * @param port The port where the JobManager is reachable for rpc communication
     * @param futureExecutor to run the JobManager's futures
     * @param ioExecutor to run blocking io operations
     * @param jobManagerClass The class of the JobManager to be started
@@ -2171,25 +2188,24 @@ object JobManager {
   def startActorSystemAndJobManagerActors(
       configuration: Configuration,
       executionMode: JobManagerMode,
-      listeningAddress: String,
-      listeningPort: Int,
-      futureExecutor: Executor,
+      externalHostname: String,
+      port: Int,
+      futureExecutor: ScheduledExecutorService,
       ioExecutor: Executor,
       jobManagerClass: Class[_ <: JobManager],
       archiveClass: Class[_ <: MemoryArchivist],
       resourceManagerClass: Option[Class[_ <: FlinkResourceManager[_]]])
     : (ActorSystem, ActorRef, ActorRef, Option[WebMonitor], Option[ActorRef]) = {
 
-    LOG.info("Starting JobManager")
+    val hostPort = NetUtils.unresolvedHostAndPortToNormalizedString(externalHostname, port)
 
     // Bring up the job manager actor system first, bind it to the given address.
-    val hostPortUrl = NetUtils.hostAndPortToUrlString(listeningAddress, listeningPort)
-    LOG.info(s"Starting JobManager actor system at $hostPortUrl")
+    LOG.info(s"Starting JobManager actor system reachable at $hostPort")
 
     val jobManagerSystem = try {
       val akkaConfig = AkkaUtils.getAkkaConfig(
         configuration,
-        Some((listeningAddress, listeningPort))
+        Some((externalHostname, port))
       )
       if (LOG.isDebugEnabled) {
         LOG.debug("Using akka configuration\n " + akkaConfig)
@@ -2201,8 +2217,7 @@ object JobManager {
         if (t.isInstanceOf[org.jboss.netty.channel.ChannelException]) {
           val cause = t.getCause()
           if (cause != null && t.getCause().isInstanceOf[java.net.BindException]) {
-            val address = listeningAddress + ":" + listeningPort
-            throw new Exception("Unable to create JobManager at address " + address +
+            throw new Exception("Unable to create JobManager at address " + hostPort +
               " - " + cause.getMessage(), t)
           }
         }
@@ -2267,7 +2282,7 @@ object JobManager {
           configuration,
           ResourceID.generate(),
           jobManagerSystem,
-          listeningAddress,
+          externalHostname,
           Some(TaskManager.TASK_MANAGER_NAME),
           None,
           localTaskManagerCommunication = true,
@@ -2360,17 +2375,17 @@ object JobManager {
       }
     }
 
-    val config = parser.parse(args, new JobManagerCliOptions()).getOrElse {
+    val cliOptions = parser.parse(args, new JobManagerCliOptions()).getOrElse {
       throw new Exception(
         s"Invalid command line arguments: ${args.mkString(" ")}. Usage: ${parser.usage}")
     }
     
-    val configDir = config.getConfigDir()
+    val configDir = cliOptions.getConfigDir()
     
     if (configDir == null) {
       throw new Exception("Missing parameter '--configDir'")
     }
-    if (config.getJobManagerMode() == null) {
+    if (cliOptions.getJobManagerMode() == null) {
       throw new Exception("Missing parameter '--executionMode'")
     }
 
@@ -2387,16 +2402,12 @@ object JobManager {
       }
     }
 
-    if (new File(configDir).isDirectory) {
-      configuration.setString(ConfigConstants.FLINK_BASE_DIR_PATH_KEY, configDir + "/..")
+    if (cliOptions.getWebUIPort() >= 0) {
+      configuration.setInteger(ConfigConstants.JOB_MANAGER_WEB_PORT_KEY, cliOptions.getWebUIPort())
     }
 
-    if (config.getWebUIPort() >= 0) {
-      configuration.setInteger(ConfigConstants.JOB_MANAGER_WEB_PORT_KEY, config.getWebUIPort())
-    }
-
-    if (config.getHost() != null) {
-      configuration.setString(ConfigConstants.JOB_MANAGER_IPC_ADDRESS_KEY, config.getHost())
+    if (cliOptions.getHost() != null) {
+      configuration.setString(ConfigConstants.JOB_MANAGER_IPC_ADDRESS_KEY, cliOptions.getHost())
     }
 
     val host = configuration.getString(ConfigConstants.JOB_MANAGER_IPC_ADDRESS_KEY, null)
@@ -2429,10 +2440,9 @@ object JobManager {
         String.valueOf(listeningPort)
       }
 
-    val executionMode = config.getJobManagerMode
-    val hostUrl = NetUtils.ipAddressToUrlString(InetAddress.getByName(host))
+    val executionMode = cliOptions.getJobManagerMode
 
-    LOG.info(s"Starting JobManager on $hostUrl:$portRange with execution mode $executionMode")
+    LOG.info(s"Starting JobManager on $host:$portRange with execution mode $executionMode")
 
     val portRangeIterator = NetUtils.getPortRangeFromString(portRange)
 
@@ -2453,7 +2463,7 @@ object JobManager {
    */
   def createJobManagerComponents(
       configuration: Configuration,
-      futureExecutor: Executor,
+      futureExecutor: ScheduledExecutorService,
       ioExecutor: Executor,
       leaderElectionServiceOption: Option[LeaderElectionService]) :
     (InstanceManager,
@@ -2588,7 +2598,7 @@ object JobManager {
   def startJobManagerActors(
       configuration: Configuration,
       actorSystem: ActorSystem,
-      futureExecutor: Executor,
+      futureExecutor: ScheduledExecutorService,
       ioExecutor: Executor,
       jobManagerClass: Class[_ <: JobManager],
       archiveClass: Class[_ <: MemoryArchivist])
@@ -2624,7 +2634,7 @@ object JobManager {
   def startJobManagerActors(
       configuration: Configuration,
       actorSystem: ActorSystem,
-      futureExecutor: Executor,
+      futureExecutor: ScheduledExecutorService,
       ioExecutor: Executor,
       jobManagerActorName: Option[String],
       archiveActorName: Option[String],
@@ -2694,7 +2704,7 @@ object JobManager {
   def getJobManagerProps(
     jobManagerClass: Class[_ <: JobManager],
     configuration: Configuration,
-    futureExecutor: Executor,
+    futureExecutor: ScheduledExecutorService,
     ioExecutor: Executor,
     instanceManager: InstanceManager,
     scheduler: FlinkScheduler,
@@ -2735,19 +2745,17 @@ object JobManager {
    * where the JobManager's actor system runs.
    *
    * @param protocol The protocol to be used to connect to the remote JobManager's actor system.
-   * @param address The address of the JobManager's actor system.
+   * @param hostPort The external address of the JobManager's actor system in format host:port
    * @return The akka URL of the JobManager actor.
    */
   def getRemoteJobManagerAkkaURL(
       protocol: String,
-      address: InetSocketAddress,
+      hostPort: String,
       name: Option[String] = None)
     : String = {
 
     require(protocol == "akka.tcp" || protocol == "akka.ssl.tcp",
         "protocol field should be either akka.tcp or akka.ssl.tcp")
-
-    val hostPort = NetUtils.socketAddressToUrlString(address)
 
     getJobManagerAkkaURLHelper(s"$protocol://flink@$hostPort", name)
   }
@@ -2761,17 +2769,7 @@ object JobManager {
   def getRemoteJobManagerAkkaURL(config: Configuration) : String = {
     val (protocol, hostname, port) = TaskManager.getAndCheckJobManagerAddress(config)
 
-    var hostPort: InetSocketAddress = null
-
-    try {
-      val inetAddress: InetAddress = InetAddress.getByName(hostname)
-      hostPort = new InetSocketAddress(inetAddress, port)
-    }
-    catch {
-      case e: UnknownHostException =>
-        throw new UnknownHostException(s"Cannot resolve the JobManager hostname '$hostname' " +
-          s"specified in the configuration")
-    }
+    val hostPort = NetUtils.unresolvedHostAndPortToNormalizedString(hostname, port)
 
     JobManager.getRemoteJobManagerAkkaURL(protocol, hostPort, Option.empty)
   }
@@ -2792,15 +2790,6 @@ object JobManager {
 
   private def getJobManagerAkkaURLHelper(address: String, name: Option[String]): String = {
     address + "/user/" + name.getOrElse(JOB_MANAGER_NAME)
-  }
-
-  def getJobManagerActorRefFuture(
-      protocol: String,
-      address: InetSocketAddress,
-      system: ActorSystem,
-      timeout: FiniteDuration)
-    : Future[ActorRef] = {
-    AkkaUtils.getActorRefFuture(getRemoteJobManagerAkkaURL(protocol, address), system, timeout)
   }
 
   /**
@@ -2825,7 +2814,7 @@ object JobManager {
    * Resolves the JobManager actor reference in a blocking fashion.
    *
    * @param protocol The protocol to be used to connect to the remote JobManager's actor system.
-   * @param address The socket address of the JobManager's actor system.
+   * @param hostPort The external address of the JobManager's actor system in format host:port.
    * @param system The local actor system that should perform the lookup.
    * @param timeout The maximum time to wait until the lookup fails.
    * @throws java.io.IOException Thrown, if the lookup fails.
@@ -2834,19 +2823,19 @@ object JobManager {
   @throws(classOf[IOException])
   def getJobManagerActorRef(
       protocol: String,
-      address: InetSocketAddress,
+      hostPort: String,
       system: ActorSystem,
       timeout: FiniteDuration)
     : ActorRef = {
 
-    val jmAddress = getRemoteJobManagerAkkaURL(protocol, address)
+    val jmAddress = getRemoteJobManagerAkkaURL(protocol, hostPort)
     getJobManagerActorRef(jmAddress, system, timeout)
   }
 
   /**
    * Resolves the JobManager actor reference in a blocking fashion.
    *
-   * @param address The socket address of the JobManager's actor system.
+   * @param hostPort The address of the JobManager's actor system in format host:port.
    * @param system The local actor system that should perform the lookup.
    * @param config The config describing the maximum time to wait until the lookup fails.
    * @throws java.io.IOException Thrown, if the lookup fails.
@@ -2854,13 +2843,13 @@ object JobManager {
    */
   @throws(classOf[IOException])
   def getJobManagerActorRef(
-      address: InetSocketAddress,
+      hostPort: String,
       system: ActorSystem,
       config: Configuration)
     : ActorRef = {
 
     val timeout = AkkaUtils.getLookupTimeout(config)
     val protocol = AkkaUtils.getAkkaProtocol(config)
-    getJobManagerActorRef(protocol, address, system, timeout)
+    getJobManagerActorRef(protocol, hostPort, system, timeout)
   }
 }
