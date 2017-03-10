@@ -31,13 +31,13 @@ import org.apache.flink.core.fs.Path;
 import org.apache.flink.runtime.state.FunctionInitializationContext;
 import org.apache.flink.runtime.state.FunctionSnapshotContext;
 import org.apache.flink.streaming.api.checkpoint.CheckpointedFunction;
+import org.apache.flink.streaming.api.checkpoint.CheckpointedRestoring;
 import org.apache.flink.util.Preconditions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.FileNotFoundException;
 import java.io.IOException;
-import java.net.URI;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -64,7 +64,7 @@ import java.util.TreeMap;
  */
 @Internal
 public class ContinuousFileMonitoringFunction<OUT>
-	extends RichSourceFunction<TimestampedFileInputSplit> implements CheckpointedFunction {
+	extends RichSourceFunction<TimestampedFileInputSplit> implements CheckpointedFunction, CheckpointedRestoring<Long> {
 
 	private static final long serialVersionUID = 1L;
 
@@ -92,7 +92,7 @@ public class ContinuousFileMonitoringFunction<OUT>
 	private final FileProcessingMode watchType;
 
 	/** The maximum file modification time seen so far. */
-	private volatile long globalModificationTime;
+	private volatile long globalModificationTime = Long.MIN_VALUE;
 
 	private transient Object checkpointLock;
 
@@ -147,15 +147,25 @@ public class ContinuousFileMonitoringFunction<OUT>
 				retrievedStates.add(entry);
 			}
 
-			// given that the parallelism of the function is 1, we can only have 1 state
-			Preconditions.checkArgument(retrievedStates.size() == 1,
+			// given that the parallelism of the function is 1, we can only have 1 or 0 retrieved items.
+			// the 0 is for the case that we are migrating from a previous Flink version.
+
+			Preconditions.checkArgument(retrievedStates.size() <= 1,
 				getClass().getSimpleName() + " retrieved invalid state.");
 
-			this.globalModificationTime = retrievedStates.get(0);
+			if (retrievedStates.size() == 1 && globalModificationTime != Long.MIN_VALUE) {
+				// this is the case where we have both legacy and new state.
+				// The two should be mutually exclusive for the operator, thus we throw the exception.
 
-			if (LOG.isDebugEnabled()) {
-				LOG.debug("{} retrieved a global mod time of {}.",
-					getClass().getSimpleName(), globalModificationTime);
+				throw new IllegalArgumentException(
+					"The " + getClass().getSimpleName() +" has already restored from a previous Flink version.");
+
+			} else if (retrievedStates.size() == 1) {
+				this.globalModificationTime = retrievedStates.get(0);
+				if (LOG.isDebugEnabled()) {
+					LOG.debug("{} retrieved a global mod time of {}.",
+						getClass().getSimpleName(), globalModificationTime);
+				}
 			}
 
 		} else {
@@ -176,8 +186,9 @@ public class ContinuousFileMonitoringFunction<OUT>
 
 	@Override
 	public void run(SourceFunction.SourceContext<TimestampedFileInputSplit> context) throws Exception {
-		FileSystem fileSystem = FileSystem.get(new URI(path));
-		if (!fileSystem.exists(new Path(path))) {
+		Path p = new Path(path);
+		FileSystem fileSystem = FileSystem.get(p.toUri());
+		if (!fileSystem.exists(p)) {
 			throw new FileNotFoundException("The provided file path " + path + " does not exist.");
 		}
 
@@ -221,7 +232,7 @@ public class ContinuousFileMonitoringFunction<OUT>
 											SourceContext<TimestampedFileInputSplit> context) throws IOException {
 		assert (Thread.holdsLock(checkpointLock));
 
-		Map<Path, FileStatus> eligibleFiles = listEligibleFiles(fs);
+		Map<Path, FileStatus> eligibleFiles = listEligibleFiles(fs, new Path(path));
 		Map<Long, List<TimestampedFileInputSplit>> splitsSortedByModTime = getInputSplitsSortedByModTime(eligibleFiles);
 
 		for (Map.Entry<Long, List<TimestampedFileInputSplit>> splits: splitsSortedByModTime.entrySet()) {
@@ -271,11 +282,11 @@ public class ContinuousFileMonitoringFunction<OUT>
 	 * Returns the paths of the files not yet processed.
 	 * @param fileSystem The filesystem where the monitored directory resides.
 	 */
-	private Map<Path, FileStatus> listEligibleFiles(FileSystem fileSystem) throws IOException {
+	private Map<Path, FileStatus> listEligibleFiles(FileSystem fileSystem, Path path) throws IOException {
 
 		final FileStatus[] statuses;
 		try {
-			statuses = fileSystem.listStatus(new Path(path));
+			statuses = fileSystem.listStatus(path);
 		} catch (IOException e) {
 			// we may run into an IOException if files are moved while listing their status
 			// delay the check for eligible files in this case
@@ -289,10 +300,14 @@ public class ContinuousFileMonitoringFunction<OUT>
 			Map<Path, FileStatus> files = new HashMap<>();
 			// handle the new files
 			for (FileStatus status : statuses) {
-				Path filePath = status.getPath();
-				long modificationTime = status.getModificationTime();
-				if (!shouldIgnore(filePath, modificationTime)) {
-					files.put(filePath, status);
+				if (!status.isDir()) {
+					Path filePath = status.getPath();
+					long modificationTime = status.getModificationTime();
+					if (!shouldIgnore(filePath, modificationTime)) {
+						files.put(filePath, status);
+					}
+				} else if (format.getNestedFileEnumeration() && format.acceptFile(status)){
+					files.putAll(listEligibleFiles(fileSystem, status.getPath()));
 				}
 			}
 			return files;
@@ -356,5 +371,13 @@ public class ContinuousFileMonitoringFunction<OUT>
 		if (LOG.isDebugEnabled()) {
 			LOG.debug("{} checkpointed {}.", getClass().getSimpleName(), globalModificationTime);
 		}
+	}
+
+	@Override
+	public void restoreState(Long state) throws Exception {
+		this.globalModificationTime = state;
+
+		LOG.info("{} (taskIdx={}) restored global modification time from an older Flink version: {}",
+			getClass().getSimpleName(), getRuntimeContext().getIndexOfThisSubtask(), globalModificationTime);
 	}
 }

@@ -64,11 +64,11 @@ public class SavepointLoaderTest {
 		Map<JobVertexID, TaskState> taskStates = new HashMap<>();
 		taskStates.put(vertexId, state);
 
+		JobID jobId = new JobID();
+
 		// Store savepoint
 		SavepointV1 savepoint = new SavepointV1(checkpointId, taskStates.values());
 		String path = SavepointStore.storeSavepoint(tmp.getAbsolutePath(), savepoint);
-
-		JobID jobId = new JobID();
 
 		ExecutionJobVertex vertex = mock(ExecutionJobVertex.class);
 		when(vertex.getParallelism()).thenReturn(parallelism);
@@ -87,6 +87,7 @@ public class SavepointLoaderTest {
 
 		// 2) Load and validate: max parallelism mismatch
 		when(vertex.getMaxParallelism()).thenReturn(222);
+		when(vertex.isMaxParallelismConfigured()).thenReturn(true);
 
 		try {
 			SavepointLoader.loadAndValidateSavepoint(jobId, tasks, path, ucl, false);

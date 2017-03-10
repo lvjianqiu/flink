@@ -41,6 +41,7 @@ import org.apache.flink.runtime.leaderretrieval.ZooKeeperLeaderRetrievalService;
 import org.apache.flink.runtime.zookeeper.RetrievableStateStorageHelper;
 import org.apache.flink.runtime.zookeeper.filesystem.FileSystemStateStorageHelper;
 import org.apache.flink.util.ConfigurationUtil;
+import org.apache.flink.util.Preconditions;
 import org.apache.zookeeper.ZooDefs;
 import org.apache.zookeeper.data.ACL;
 import org.slf4j.Logger;
@@ -65,6 +66,7 @@ public class ZooKeeperUtils {
 	 * @return {@link CuratorFramework} instance
 	 */
 	public static CuratorFramework startCuratorFramework(Configuration configuration) {
+		Preconditions.checkNotNull(configuration, "configuration");
 		String zkQuorum = configuration.getValue(HighAvailabilityOptions.HA_ZOOKEEPER_QUORUM);
 
 		if (zkQuorum == null || StringUtils.isBlank(zkQuorum)) {
@@ -161,13 +163,45 @@ public class ZooKeeperUtils {
 	 * @return {@link ZooKeeperLeaderRetrievalService} instance.
 	 */
 	public static ZooKeeperLeaderRetrievalService createLeaderRetrievalService(
-			Configuration configuration) {
-		CuratorFramework client = startCuratorFramework(configuration);
+			Configuration configuration) throws Exception {
+		final CuratorFramework client = startCuratorFramework(configuration);
+		return createLeaderRetrievalService(client, configuration);
+	}
+
+	/**
+	 * Creates a {@link ZooKeeperLeaderRetrievalService} instance.
+	 *
+	 * @param client        The {@link CuratorFramework} ZooKeeper client to use
+	 * @param configuration {@link Configuration} object containing the configuration values
+	 * @return {@link ZooKeeperLeaderRetrievalService} instance.
+	 * @throws Exception
+	 */
+	public static ZooKeeperLeaderRetrievalService createLeaderRetrievalService(
+		final CuratorFramework client,
+		final Configuration configuration) throws Exception
+	{
+		return createLeaderRetrievalService(client, configuration, "");
+	}
+
+	/**
+	 * Creates a {@link ZooKeeperLeaderRetrievalService} instance.
+	 *
+	 * @param client        The {@link CuratorFramework} ZooKeeper client to use
+	 * @param configuration {@link Configuration} object containing the configuration values
+	 * @param pathSuffix    The path suffix which we want to append
+	 * @return {@link ZooKeeperLeaderRetrievalService} instance.
+	 * @throws Exception
+	 */
+	public static ZooKeeperLeaderRetrievalService createLeaderRetrievalService(
+		final CuratorFramework client,
+		final Configuration configuration,
+		final String pathSuffix)
+	{
 		String leaderPath = ConfigurationUtil.getStringWithDeprecatedKeys(
-				configuration,
-				ConfigConstants.HA_ZOOKEEPER_LEADER_PATH,
-				ConfigConstants.DEFAULT_ZOOKEEPER_LEADER_PATH,
-				ConfigConstants.ZOOKEEPER_LEADER_PATH);
+			configuration,
+			ConfigConstants.HA_ZOOKEEPER_LEADER_PATH,
+			ConfigConstants.DEFAULT_ZOOKEEPER_LEADER_PATH,
+			ConfigConstants.ZOOKEEPER_LEADER_PATH) + pathSuffix;
 
 		return new ZooKeeperLeaderRetrievalService(client, leaderPath);
 	}
@@ -180,7 +214,7 @@ public class ZooKeeperUtils {
 	 * @return {@link ZooKeeperLeaderElectionService} instance.
 	 */
 	public static ZooKeeperLeaderElectionService createLeaderElectionService(
-			Configuration configuration) {
+			Configuration configuration) throws Exception {
 
 		CuratorFramework client = startCuratorFramework(configuration);
 
@@ -196,18 +230,34 @@ public class ZooKeeperUtils {
 	 */
 	public static ZooKeeperLeaderElectionService createLeaderElectionService(
 			CuratorFramework client,
-			Configuration configuration) {
+			Configuration configuration) throws Exception {
 
-		String latchPath = ConfigurationUtil.getStringWithDeprecatedKeys(
-				configuration,
-				ConfigConstants.HA_ZOOKEEPER_LATCH_PATH,
-				ConfigConstants.DEFAULT_ZOOKEEPER_LATCH_PATH,
-				ConfigConstants.ZOOKEEPER_LATCH_PATH);
-		String leaderPath = ConfigurationUtil.getStringWithDeprecatedKeys(
-				configuration,
-				ConfigConstants.HA_ZOOKEEPER_LEADER_PATH,
-				ConfigConstants.DEFAULT_ZOOKEEPER_LEADER_PATH,
-				ConfigConstants.ZOOKEEPER_LEADER_PATH);
+		return createLeaderElectionService(client, configuration, "");
+	}
+
+	/**
+	 * Creates a {@link ZooKeeperLeaderElectionService} instance.
+	 *
+	 * @param client        The {@link CuratorFramework} ZooKeeper client to use
+	 * @param configuration {@link Configuration} object containing the configuration values
+	 * @param pathSuffix    The path suffix which we want to append
+	 * @return {@link ZooKeeperLeaderElectionService} instance.
+	 */
+	public static ZooKeeperLeaderElectionService createLeaderElectionService(
+		final CuratorFramework client,
+		final Configuration configuration,
+		final String pathSuffix)
+	{
+		final String latchPath = ConfigurationUtil.getStringWithDeprecatedKeys(
+			configuration,
+			ConfigConstants.HA_ZOOKEEPER_LATCH_PATH,
+			ConfigConstants.DEFAULT_ZOOKEEPER_LATCH_PATH,
+			ConfigConstants.ZOOKEEPER_LATCH_PATH) + pathSuffix;
+		final String leaderPath = ConfigurationUtil.getStringWithDeprecatedKeys(
+			configuration,
+			ConfigConstants.HA_ZOOKEEPER_LEADER_PATH,
+			ConfigConstants.DEFAULT_ZOOKEEPER_LEADER_PATH,
+			ConfigConstants.ZOOKEEPER_LEADER_PATH) + pathSuffix;
 
 		return new ZooKeeperLeaderElectionService(client, latchPath, leaderPath);
 	}
@@ -328,13 +378,17 @@ public class ZooKeeperUtils {
 		}
 	}
 
-	private static String generateZookeeperPath(String root, String namespace) {
+	public static String generateZookeeperPath(String root, String namespace) {
 		if (!namespace.startsWith("/")) {
-			namespace = "/" + namespace;
+			namespace = '/' + namespace;
 		}
 
 		if (namespace.endsWith("/")) {
 			namespace = namespace.substring(0, namespace.length() - 1);
+		}
+
+		if (root.endsWith("/")) {
+			root = root.substring(0, root.length() - 1);
 		}
 
 		return root + namespace;

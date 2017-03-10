@@ -18,6 +18,11 @@
 
 package org.apache.flink.runtime.state;
 
+import org.apache.flink.util.ExceptionUtils;
+import org.apache.flink.util.FutureUtil;
+
+import java.util.concurrent.RunnableFuture;
+
 /**
  * Helpers for {@link StateObject} related code.
  */
@@ -38,26 +43,41 @@ public class StateUtil {
 			Iterable<? extends StateObject> handlesToDiscard) throws Exception {
 
 		if (handlesToDiscard != null) {
-
-			Exception suppressedExceptions = null;
+			Exception exception = null;
 
 			for (StateObject state : handlesToDiscard) {
 
 				if (state != null) {
 					try {
 						state.discardState();
-					} catch (Exception ex) {
-						//best effort to still cleanup other states and deliver exceptions in the end
-						if (suppressedExceptions == null) {
-							suppressedExceptions = new Exception(ex);
-						}
-						suppressedExceptions.addSuppressed(ex);
+					}
+					catch (Exception ex) {
+						exception = ExceptionUtils.firstOrSuppressed(ex, exception);
 					}
 				}
 			}
 
-			if (suppressedExceptions != null) {
-				throw suppressedExceptions;
+			if (exception != null) {
+				throw exception;
+			}
+		}
+	}
+
+	/**
+	 * Discards the given state future by first trying to cancel it. If this is not possible, then
+	 * the state object contained in the future is calculated and afterwards discarded.
+	 *
+	 * @param stateFuture to be discarded
+	 * @throws Exception if the discard operation failed
+	 */
+	public static void discardStateFuture(RunnableFuture<? extends StateObject> stateFuture) throws Exception {
+		if (null != stateFuture) {
+			if (!stateFuture.cancel(true)) {
+				StateObject stateObject = FutureUtil.runIfNotDoneAndGet(stateFuture);
+
+				if (null != stateObject) {
+					stateObject.discardState();
+				}
 			}
 		}
 	}

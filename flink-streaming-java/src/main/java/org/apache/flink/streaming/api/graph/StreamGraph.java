@@ -32,6 +32,7 @@ import java.util.Set;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.io.InputFormat;
+import org.apache.flink.api.common.operators.ResourceSpec;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.java.functions.KeySelector;
@@ -41,6 +42,7 @@ import org.apache.flink.api.java.typeutils.MissingTypeInfo;
 import org.apache.flink.optimizer.plan.StreamingPlan;
 import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.jobgraph.tasks.AbstractInvokable;
+import org.apache.flink.runtime.state.AbstractStateBackend;
 import org.apache.flink.streaming.api.collector.selector.OutputSelector;
 import org.apache.flink.streaming.api.environment.CheckpointConfig;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -49,8 +51,6 @@ import org.apache.flink.streaming.api.operators.StoppableStreamSource;
 import org.apache.flink.streaming.api.operators.StreamOperator;
 import org.apache.flink.streaming.api.operators.StreamSource;
 import org.apache.flink.streaming.api.operators.TwoInputStreamOperator;
-import org.apache.flink.runtime.state.AbstractStateBackend;
-import org.apache.flink.streaming.runtime.partitioner.ConfigurableStreamPartitioner;
 import org.apache.flink.streaming.runtime.partitioner.ForwardPartitioner;
 import org.apache.flink.streaming.runtime.partitioner.RebalancePartitioner;
 import org.apache.flink.streaming.runtime.partitioner.StreamPartitioner;
@@ -85,7 +85,7 @@ public class StreamGraph extends StreamingPlan {
 	private Set<Integer> sources;
 	private Set<Integer> sinks;
 	private Map<Integer, Tuple2<Integer, List<String>>> virtualSelectNodes;
-	private Map<Integer, Tuple2<Integer, StreamPartitioner<?>>> virtuaPartitionNodes;
+	private Map<Integer, Tuple2<Integer, StreamPartitioner<?>>> virtualPartitionNodes;
 
 	protected Map<Integer, String> vertexIDtoBrokerID;
 	protected Map<Integer, Long> vertexIDtoLoopTimeout;
@@ -108,7 +108,7 @@ public class StreamGraph extends StreamingPlan {
 	public void clear() {
 		streamNodes = new HashMap<>();
 		virtualSelectNodes = new HashMap<>();
-		virtuaPartitionNodes = new HashMap<>();
+		virtualPartitionNodes = new HashMap<>();
 		vertexIDtoBrokerID = new HashMap<>();
 		vertexIDtoLoopTimeout  = new HashMap<>();
 		iterationSourceSinkPairs = new HashSet<>();
@@ -202,7 +202,7 @@ public class StreamGraph extends StreamingPlan {
 
 		setSerializers(vertexID, inSerializer, null, outSerializer);
 
-		if (operatorObject instanceof OutputTypeConfigurable) {
+		if (operatorObject instanceof OutputTypeConfigurable && outTypeInfo != null) {
 			@SuppressWarnings("unchecked")
 			OutputTypeConfigurable<OUT> outputTypeConfigurable = (OutputTypeConfigurable<OUT>) operatorObject;
 			// sets the output type which must be know at StreamGraph creation time
@@ -304,11 +304,11 @@ public class StreamGraph extends StreamingPlan {
 	 */
 	public void addVirtualPartitionNode(Integer originalId, Integer virtualId, StreamPartitioner<?> partitioner) {
 
-		if (virtuaPartitionNodes.containsKey(virtualId)) {
+		if (virtualPartitionNodes.containsKey(virtualId)) {
 			throw new IllegalStateException("Already has virtual partition node with id " + virtualId);
 		}
 
-		virtuaPartitionNodes.put(virtualId,
+		virtualPartitionNodes.put(virtualId,
 				new Tuple2<Integer, StreamPartitioner<?>>(originalId, partitioner));
 	}
 
@@ -319,8 +319,8 @@ public class StreamGraph extends StreamingPlan {
 		if (virtualSelectNodes.containsKey(id)) {
 			Integer mappedId = virtualSelectNodes.get(id).f0;
 			return getSlotSharingGroup(mappedId);
-		} else if (virtuaPartitionNodes.containsKey(id)) {
-			Integer mappedId = virtuaPartitionNodes.get(id).f0;
+		} else if (virtualPartitionNodes.containsKey(id)) {
+			Integer mappedId = virtualPartitionNodes.get(id).f0;
 			return getSlotSharingGroup(mappedId);
 		} else {
 			StreamNode node = getStreamNode(id);
@@ -352,24 +352,12 @@ public class StreamGraph extends StreamingPlan {
 				outputNames = virtualSelectNodes.get(virtualId).f1;
 			}
 			addEdgeInternal(upStreamVertexID, downStreamVertexID, typeNumber, partitioner, outputNames);
-		} else if (virtuaPartitionNodes.containsKey(upStreamVertexID)) {
+		} else if (virtualPartitionNodes.containsKey(upStreamVertexID)) {
 			int virtualId = upStreamVertexID;
-			upStreamVertexID = virtuaPartitionNodes.get(virtualId).f0;
+			upStreamVertexID = virtualPartitionNodes.get(virtualId).f0;
 			if (partitioner == null) {
-				partitioner = virtuaPartitionNodes.get(virtualId).f1;
+				partitioner = virtualPartitionNodes.get(virtualId).f1;
 			}
-
-			if (partitioner instanceof ConfigurableStreamPartitioner) {
-				StreamNode downstreamNode = getStreamNode(downStreamVertexID);
-
-				ConfigurableStreamPartitioner configurableStreamPartitioner = (ConfigurableStreamPartitioner) partitioner;
-
-				// Configure the partitioner with the max parallelism. This is necessary if the
-				// partitioner has been created before the maximum parallelism has been set. The
-				// maximum parallelism is necessary for the key group mapping.
-				configurableStreamPartitioner.configure(downstreamNode.getMaxParallelism());
-			}
-
 			addEdgeInternal(upStreamVertexID, downStreamVertexID, typeNumber, partitioner, outputNames);
 		} else {
 			StreamNode upstreamNode = getStreamNode(upStreamVertexID);
@@ -400,8 +388,8 @@ public class StreamGraph extends StreamingPlan {
 	}
 
 	public <T> void addOutputSelector(Integer vertexID, OutputSelector<T> outputSelector) {
-		if (virtuaPartitionNodes.containsKey(vertexID)) {
-			addOutputSelector(virtuaPartitionNodes.get(vertexID).f0, outputSelector);
+		if (virtualPartitionNodes.containsKey(vertexID)) {
+			addOutputSelector(virtualPartitionNodes.get(vertexID).f0, outputSelector);
 		} else if (virtualSelectNodes.containsKey(vertexID)) {
 			addOutputSelector(virtualSelectNodes.get(vertexID).f0, outputSelector);
 		} else {
@@ -423,6 +411,12 @@ public class StreamGraph extends StreamingPlan {
 	public void setMaxParallelism(int vertexID, int maxParallelism) {
 		if (getStreamNode(vertexID) != null) {
 			getStreamNode(vertexID).setMaxParallelism(maxParallelism);
+		}
+	}
+
+	public void setResource(int vertexID, ResourceSpec minResource, ResourceSpec preferredResource) {
+		if (getStreamNode(vertexID) != null) {
+			getStreamNode(vertexID).setResources(minResource, preferredResource);
 		}
 	}
 
@@ -472,10 +466,17 @@ public class StreamGraph extends StreamingPlan {
 		getStreamNode(vertexID).setInputFormat(inputFormat);
 	}
 
-	void setTransformationId(Integer nodeId, String transformationId) {
+	void setTransformationUID(Integer nodeId, String transformationId) {
 		StreamNode node = streamNodes.get(nodeId);
 		if (node != null) {
-			node.setTransformationId(transformationId);
+			node.setTransformationUID(transformationId);
+		}
+	}
+
+	void setTransformationUserHash(Integer nodeId, String nodeHash) {
+		StreamNode node = streamNodes.get(nodeId);
+		if (node != null) {
+			node.setUserHash(nodeHash);
 		}
 	}
 

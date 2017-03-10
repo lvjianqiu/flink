@@ -20,6 +20,7 @@ package org.apache.flink.runtime.state;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.state.ListState;
 import org.apache.flink.api.common.state.ListStateDescriptor;
+import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.execution.Environment;
 import org.apache.flink.runtime.state.memory.MemoryStateBackend;
 import org.junit.Test;
@@ -31,12 +32,13 @@ import java.util.Iterator;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 public class OperatorStateBackendTest {
 
-	AbstractStateBackend abstractStateBackend = new MemoryStateBackend(1024);
+	AbstractStateBackend abstractStateBackend = new MemoryStateBackend(4096);
 
 	static Environment createMockEnvironment() {
 		Environment env = mock(Environment.class);
@@ -44,8 +46,11 @@ public class OperatorStateBackendTest {
 		return env;
 	}
 
-	private OperatorStateBackend createNewOperatorStateBackend() throws Exception {
-		return abstractStateBackend.createOperatorStateBackend(createMockEnvironment(), "test-operator");
+	private DefaultOperatorStateBackend createNewOperatorStateBackend() throws Exception {
+		//TODO this is temporarily casted to test already functionality that we do not yet expose through public API
+		return (DefaultOperatorStateBackend) abstractStateBackend.createOperatorStateBackend(
+				createMockEnvironment(),
+				"test-operator");
 	}
 
 	@Test
@@ -57,9 +62,10 @@ public class OperatorStateBackendTest {
 
 	@Test
 	public void testRegisterStates() throws Exception {
-		OperatorStateBackend operatorStateBackend = createNewOperatorStateBackend();
+		DefaultOperatorStateBackend operatorStateBackend = createNewOperatorStateBackend();
 		ListStateDescriptor<Serializable> stateDescriptor1 = new ListStateDescriptor<>("test1", new JavaSerializer<>());
 		ListStateDescriptor<Serializable> stateDescriptor2 = new ListStateDescriptor<>("test2", new JavaSerializer<>());
+		ListStateDescriptor<Serializable> stateDescriptor3 = new ListStateDescriptor<>("test3", new JavaSerializer<>());
 		ListState<Serializable> listState1 = operatorStateBackend.getOperatorState(stateDescriptor1);
 		assertNotNull(listState1);
 		assertEquals(1, operatorStateBackend.getRegisteredStateNames().size());
@@ -87,6 +93,20 @@ public class OperatorStateBackendTest {
 		assertEquals(23, it.next());
 		assertTrue(!it.hasNext());
 
+		ListState<Serializable> listState3 = operatorStateBackend.getBroadcastOperatorState(stateDescriptor3);
+		assertNotNull(listState3);
+		assertEquals(3, operatorStateBackend.getRegisteredStateNames().size());
+		assertTrue(!it.hasNext());
+		listState3.add(17);
+		listState3.add(3);
+		listState3.add(123);
+
+		it = listState3.get().iterator();
+		assertEquals(17, it.next());
+		assertEquals(3, it.next());
+		assertEquals(123, it.next());
+		assertTrue(!it.hasNext());
+
 		ListState<Serializable> listState1b = operatorStateBackend.getOperatorState(stateDescriptor1);
 		assertNotNull(listState1b);
 		listState1b.add(123);
@@ -107,15 +127,31 @@ public class OperatorStateBackendTest {
 		assertEquals(4711, it.next());
 		assertEquals(123, it.next());
 		assertTrue(!it.hasNext());
+
+		try {
+			operatorStateBackend.getBroadcastOperatorState(stateDescriptor2);
+			fail("Did not detect changed mode");
+		} catch (IllegalStateException ignored) {
+
+		}
+
+		try {
+			operatorStateBackend.getOperatorState(stateDescriptor3);
+			fail("Did not detect changed mode");
+		} catch (IllegalStateException ignored) {
+
+		}
 	}
 
 	@Test
 	public void testSnapshotRestore() throws Exception {
-		OperatorStateBackend operatorStateBackend = createNewOperatorStateBackend();
+		DefaultOperatorStateBackend operatorStateBackend = createNewOperatorStateBackend();
 		ListStateDescriptor<Serializable> stateDescriptor1 = new ListStateDescriptor<>("test1", new JavaSerializer<>());
 		ListStateDescriptor<Serializable> stateDescriptor2 = new ListStateDescriptor<>("test2", new JavaSerializer<>());
+		ListStateDescriptor<Serializable> stateDescriptor3 = new ListStateDescriptor<>("test3", new JavaSerializer<>());
 		ListState<Serializable> listState1 = operatorStateBackend.getOperatorState(stateDescriptor1);
 		ListState<Serializable> listState2 = operatorStateBackend.getOperatorState(stateDescriptor2);
+		ListState<Serializable> listState3 = operatorStateBackend.getBroadcastOperatorState(stateDescriptor3);
 
 		listState1.add(42);
 		listState1.add(4711);
@@ -124,23 +160,33 @@ public class OperatorStateBackendTest {
 		listState2.add(13);
 		listState2.add(23);
 
+		listState3.add(17);
+		listState3.add(18);
+		listState3.add(19);
+		listState3.add(20);
+
 		CheckpointStreamFactory streamFactory = abstractStateBackend.createStreamFactory(new JobID(), "testOperator");
-		OperatorStateHandle stateHandle = operatorStateBackend.snapshot(1, 1, streamFactory).get();
+		OperatorStateHandle stateHandle = operatorStateBackend.snapshot(1, 1, streamFactory, CheckpointOptions.forFullCheckpoint()).get();
 
 		try {
 
+			operatorStateBackend.close();
 			operatorStateBackend.dispose();
 
-			operatorStateBackend = abstractStateBackend.restoreOperatorStateBackend(
-					createMockEnvironment(), "testOperator", Collections.singletonList(stateHandle));
+			//TODO this is temporarily casted to test already functionality that we do not yet expose through public API
+			operatorStateBackend = (DefaultOperatorStateBackend) abstractStateBackend.createOperatorStateBackend(
+					createMockEnvironment(),
+					"testOperator");
 
-			assertEquals(2, operatorStateBackend.getRegisteredStateNames().size());
+			operatorStateBackend.restore(Collections.singletonList(stateHandle));
+
+			assertEquals(3, operatorStateBackend.getRegisteredStateNames().size());
 
 			listState1 = operatorStateBackend.getOperatorState(stateDescriptor1);
 			listState2 = operatorStateBackend.getOperatorState(stateDescriptor2);
+			listState3 = operatorStateBackend.getBroadcastOperatorState(stateDescriptor3);
 
-			assertEquals(2, operatorStateBackend.getRegisteredStateNames().size());
-
+			assertEquals(3, operatorStateBackend.getRegisteredStateNames().size());
 
 			Iterator<Serializable> it = listState1.get().iterator();
 			assertEquals(42, it.next());
@@ -153,6 +199,14 @@ public class OperatorStateBackendTest {
 			assertEquals(23, it.next());
 			assertTrue(!it.hasNext());
 
+			it = listState3.get().iterator();
+			assertEquals(17, it.next());
+			assertEquals(18, it.next());
+			assertEquals(19, it.next());
+			assertEquals(20, it.next());
+			assertTrue(!it.hasNext());
+
+			operatorStateBackend.close();
 			operatorStateBackend.dispose();
 		} finally {
 			stateHandle.discardState();

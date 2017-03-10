@@ -31,10 +31,10 @@ import org.apache.flink.runtime.instance.AkkaActorGateway;
 import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.jobgraph.JobStatus;
 import org.apache.flink.runtime.jobgraph.JobVertex;
-import org.apache.flink.runtime.jobmanager.Tasks;
 import org.apache.flink.runtime.leaderelection.TestingListener;
 import org.apache.flink.runtime.leaderretrieval.LeaderRetrievalService;
 import org.apache.flink.runtime.taskmanager.TaskManager;
+import org.apache.flink.runtime.testtasks.BlockingNoOpInvokable;
 import org.apache.flink.runtime.testutils.CommonTestUtils;
 import org.apache.flink.runtime.testutils.JobManagerActorTestUtils;
 import org.apache.flink.runtime.testutils.JobManagerProcess;
@@ -42,7 +42,7 @@ import org.apache.flink.runtime.testutils.ZooKeeperTestUtils;
 import org.apache.flink.runtime.util.ZooKeeperUtils;
 import org.apache.flink.runtime.zookeeper.ZooKeeperTestEnvironment;
 import org.apache.flink.runtime.state.CheckpointListener;
-import org.apache.flink.streaming.api.checkpoint.Checkpointed;
+import org.apache.flink.streaming.api.checkpoint.ListCheckpointed;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.sink.SinkFunction;
 import org.apache.flink.streaming.api.functions.source.RichParallelSourceFunction;
@@ -63,6 +63,8 @@ import scala.concurrent.duration.FiniteDuration;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.Collections;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -165,7 +167,7 @@ public class JobManagerHACheckpointRecoveryITCase extends TestLogger {
 		config.setInteger(ConfigConstants.TASK_MANAGER_NUM_TASK_SLOTS, Parallelism);
 
 		ActorSystem testSystem = null;
-		JobManagerProcess[] jobManagerProcess = new JobManagerProcess[2];
+		final JobManagerProcess[] jobManagerProcess = new JobManagerProcess[2];
 		LeaderRetrievalService leaderRetrievalService = null;
 		ActorSystem taskManagerSystem = null;
 
@@ -372,7 +374,7 @@ public class JobManagerHACheckpointRecoveryITCase extends TestLogger {
 
 			// Blocking JobGraph
 			JobVertex blockingVertex = new JobVertex("Blocking vertex");
-			blockingVertex.setInvokableClass(Tasks.BlockingNoOpInvokable.class);
+			blockingVertex.setInvokableClass(BlockingNoOpInvokable.class);
 			JobGraph jobGraph = new JobGraph(blockingVertex);
 
 			// Submit the job in detached mode
@@ -460,7 +462,7 @@ public class JobManagerHACheckpointRecoveryITCase extends TestLogger {
 	 * A checkpointed source, which emits elements from 0 to a configured number.
 	 */
 	public static class CheckpointedSequenceSource extends RichParallelSourceFunction<Long>
-			implements Checkpointed<Long> {
+			implements ListCheckpointed<Long> {
 
 		private static final Logger LOG = LoggerFactory.getLogger(CheckpointedSequenceSource.class);
 
@@ -500,22 +502,26 @@ public class JobManagerHACheckpointRecoveryITCase extends TestLogger {
 		}
 
 		@Override
-		public Long snapshotState(long checkpointId, long checkpointTimestamp) throws Exception {
+		public List<Long> snapshotState(long checkpointId, long timestamp) throws Exception {
 			LOG.debug("Snapshotting state {} @ ID {}.", current, checkpointId);
-			return current;
+			return Collections.singletonList(this.current);
 		}
 
 		@Override
-		public void restoreState(Long state) {
-			LOG.debug("Restoring state {}", state);
+		public void restoreState(List<Long> state) throws Exception {
+			if (state.isEmpty() || state.size() > 1) {
+				throw new RuntimeException("Test failed due to unexpected recovered state size " + state.size());
+			}
+			Long s = state.get(0);
+			LOG.debug("Restoring state {}", s);
 
 			// This is necessary to make sure that something is recovered at all. Otherwise it
 			// might happen that the job is restarted from the beginning.
-			RecoveredStates.set(getRuntimeContext().getIndexOfThisSubtask(), state);
+			RecoveredStates.set(getRuntimeContext().getIndexOfThisSubtask(), s);
 
 			sync.countDown();
 
-			current = state;
+			current = s;
 		}
 
 		@Override
@@ -528,7 +534,7 @@ public class JobManagerHACheckpointRecoveryITCase extends TestLogger {
 	 * A checkpointed sink, which sums up its input and notifies the main thread after all inputs
 	 * are exhausted.
 	 */
-	public static class CountingSink implements SinkFunction<Long>, Checkpointed<CountingSink>,
+	public static class CountingSink implements SinkFunction<Long>, ListCheckpointed<CountingSink>,
 		CheckpointListener {
 
 		private static final Logger LOG = LoggerFactory.getLogger(CountingSink.class);
@@ -558,16 +564,21 @@ public class JobManagerHACheckpointRecoveryITCase extends TestLogger {
 		}
 
 		@Override
-		public CountingSink snapshotState(long checkpointId, long checkpointTimestamp) throws Exception {
+		public List<CountingSink> snapshotState(long checkpointId, long timestamp) throws Exception {
 			LOG.debug("Snapshotting state {}:{} @ ID {}.", current, numberOfReceivedLastElements, checkpointId);
-			return this;
+			return Collections.singletonList(this);
 		}
 
 		@Override
-		public void restoreState(CountingSink state) {
-			LOG.debug("Restoring state {}:{}", state.current, state.numberOfReceivedLastElements);
-			this.current = state.current;
-			this.numberOfReceivedLastElements = state.numberOfReceivedLastElements;
+		public void restoreState(List<CountingSink> state) throws Exception {
+			if (state.isEmpty() || state.size() > 1) {
+				throw new RuntimeException("Test failed due to unexpected recovered state size " + state.size());
+			}
+			CountingSink s = state.get(0);
+			LOG.debug("Restoring state {}:{}", s.current, s.numberOfReceivedLastElements);
+
+			this.current = s.current;
+			this.numberOfReceivedLastElements = s.numberOfReceivedLastElements;
 		}
 
 		@Override

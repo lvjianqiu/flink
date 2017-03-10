@@ -59,7 +59,7 @@ public final class InstantiationUtil {
 		}
 
 		@Override
-		public Class<?> resolveClass(ObjectStreamClass desc) throws IOException, ClassNotFoundException {
+		protected Class<?> resolveClass(ObjectStreamClass desc) throws IOException, ClassNotFoundException {
 			if (classLoader != null) {
 				String name = desc.getName();
 				try {
@@ -323,6 +323,16 @@ public final class InstantiationUtil {
 	public static void serializeObject(OutputStream out, Object o) throws IOException {
 		ObjectOutputStream oos = new ObjectOutputStream(out);
 		oos.writeObject(o);
+	}
+
+	public static boolean isSerializable(Object o) {
+		try {
+			serializeObject(o);
+		} catch (IOException e) {
+			return false;
+		}
+
+		return true;
 	}
 
 	/**

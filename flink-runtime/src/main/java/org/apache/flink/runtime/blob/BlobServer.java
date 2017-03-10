@@ -18,14 +18,15 @@
 
 package org.apache.flink.runtime.blob;
 
-import org.apache.commons.io.FileUtils;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.configuration.ConfigConstants;
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.configuration.IllegalConfigurationException;
+import org.apache.flink.runtime.highavailability.HighAvailabilityServices;
 import org.apache.flink.runtime.jobmanager.HighAvailabilityMode;
 import org.apache.flink.runtime.net.SSLUtils;
+import org.apache.flink.util.FileUtils;
 import org.apache.flink.util.NetUtils;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -44,6 +45,7 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static org.apache.flink.util.Preconditions.checkArgument;
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
 /**
@@ -71,10 +73,10 @@ public class BlobServer extends Thread implements BlobService {
 	/** Indicates whether a shutdown of server component has been requested. */
 	private final AtomicBoolean shutdownRequested = new AtomicBoolean();
 
-	/** Is the root directory for file storage */
+	/** Root directory for local file storage */
 	private final File storageDir;
 
-	/** Blob store for HA */
+	/** Blob store for distributed file storage, e.g. in HA */
 	private final BlobStore blobStore;
 
 	/** Set of currently running threads */
@@ -93,27 +95,25 @@ public class BlobServer extends Thread implements BlobService {
 	 * Instantiates a new BLOB server and binds it to a free network port.
 	 *
 	 * @throws IOException
-	 *         thrown if the BLOB server cannot bind to a free network port
+	 * 		thrown if the BLOB server cannot bind to a free network port or if the
+	 * 		(local or distributed) file storage cannot be created or is not usable
 	 */
 	public BlobServer(Configuration config) throws IOException {
-		checkNotNull(config, "Configuration");
+		this(config, BlobUtils.createBlobStoreFromConfig(config));
+	}
 
-		HighAvailabilityMode highAvailabilityMode = HighAvailabilityMode.fromConfig(config);
+	public BlobServer(Configuration config, HighAvailabilityServices haServices) throws IOException {
+		this(config, haServices.createBlobStore());
+	}
 
-		this.blobServiceConfiguration = config;
+	private BlobServer(Configuration config, BlobStore blobStore) throws IOException {
+		this.blobServiceConfiguration = checkNotNull(config);
+		this.blobStore = checkNotNull(blobStore);
 
 		// configure and create the storage directory
 		String storageDirectory = config.getString(ConfigConstants.BLOB_STORAGE_DIRECTORY_KEY, null);
 		this.storageDir = BlobUtils.initStorageDirectory(storageDirectory);
 		LOG.info("Created BLOB server storage directory {}", storageDir);
-
-		if (highAvailabilityMode == HighAvailabilityMode.NONE) {
-			this.blobStore = new VoidBlobStore();
-		} else if (highAvailabilityMode == HighAvailabilityMode.ZOOKEEPER) {
-			this.blobStore = new FileSystemBlobStore(config);
-		} else {
-			throw new IllegalConfigurationException("Unexpected high availability mode '" + highAvailabilityMode + ".");
-		}
 
 		// configure the maximum number of concurrent connections
 		final int maxConnections = config.getInteger(
@@ -135,13 +135,7 @@ public class BlobServer extends Thread implements BlobService {
 			backlog = ConfigConstants.DEFAULT_BLOB_FETCH_BACKLOG;
 		}
 
-		if (highAvailabilityMode == HighAvailabilityMode.NONE) {
-			// Add shutdown hook to delete storage directory
-			this.shutdownHook = BlobUtils.addShutdownHook(this, LOG);
-		}
-		else {
-			this.shutdownHook = null;
-		}
+		this.shutdownHook = BlobUtils.addShutdownHook(this, LOG);
 
 		if (config.getBoolean(ConfigConstants.BLOB_SERVICE_SSL_ENABLED,
 				ConfigConstants.DEFAULT_BLOB_SERVICE_SSL_ENABLED)) {
@@ -359,9 +353,7 @@ public class BlobServer extends Thread implements BlobService {
 	 */
 	@Override
 	public URL getURL(BlobKey requiredBlob) throws IOException {
-		if (requiredBlob == null) {
-			throw new IllegalArgumentException("Required BLOB cannot be null.");
-		}
+		checkArgument(requiredBlob != null, "BLOB key cannot be null.");
 
 		final File localFile = BlobUtils.getStorageLocation(storageDir, requiredBlob);
 

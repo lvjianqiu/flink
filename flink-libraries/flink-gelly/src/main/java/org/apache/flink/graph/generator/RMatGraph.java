@@ -30,6 +30,7 @@ import org.apache.flink.graph.generator.random.RandomGenerableFactory;
 import org.apache.flink.types.LongValue;
 import org.apache.flink.types.NullValue;
 import org.apache.flink.util.Collector;
+import org.apache.flink.util.Preconditions;
 
 import java.util.List;
 
@@ -38,6 +39,10 @@ import java.util.List;
  */
 public class RMatGraph<T extends RandomGenerator>
 extends AbstractGraphGenerator<LongValue, NullValue, NullValue> {
+
+	public static final int MINIMUM_VERTEX_COUNT = 1;
+
+	public static final int MINIMUM_EDGE_COUNT = 1;
 
 	// Default RMat constants
 	public static final float DEFAULT_A = 0.57f;
@@ -59,15 +64,15 @@ extends AbstractGraphGenerator<LongValue, NullValue, NullValue> {
 	private final long edgeCount;
 
 	// Optional configuration
-	private float A = DEFAULT_A;
+	public float A = DEFAULT_A;
 
-	private float B = DEFAULT_B;
+	public float B = DEFAULT_B;
 
-	private float C = DEFAULT_C;
+	public float C = DEFAULT_C;
 
 	private boolean noiseEnabled = false;
 
-	private float noise = DEFAULT_NOISE;
+	public float noise = DEFAULT_NOISE;
 
 	/**
 	 * Generate a directed or undirected power-law {@link Graph} using the
@@ -79,13 +84,11 @@ extends AbstractGraphGenerator<LongValue, NullValue, NullValue> {
 	 * @param edgeCount number of edges
 	 */
 	public RMatGraph(ExecutionEnvironment env, RandomGenerableFactory<T> randomGeneratorFactory, long vertexCount, long edgeCount) {
-		if (vertexCount <= 0) {
-			throw new IllegalArgumentException("Vertex count must be greater than zero");
-		}
+		Preconditions.checkArgument(vertexCount >= MINIMUM_VERTEX_COUNT,
+			"Vertex count must be at least " + MINIMUM_VERTEX_COUNT);
 
-		if (edgeCount <= 0) {
-			throw new IllegalArgumentException("Edge count must be greater than zero");
-		}
+		Preconditions.checkArgument(edgeCount >= MINIMUM_EDGE_COUNT,
+			"Edge count must be at least " + MINIMUM_EDGE_COUNT);
 
 		this.env = env;
 		this.randomGenerableFactory = randomGeneratorFactory;
@@ -106,9 +109,8 @@ extends AbstractGraphGenerator<LongValue, NullValue, NullValue> {
 	 * @return this
 	 */
 	public RMatGraph<T> setConstants(float A, float B, float C) {
-		if (A < 0.0f || B < 0.0f || C < 0.0f || A + B + C > 1.0f) {
-			throw new RuntimeException("RMat parameters A, B, and C must be non-negative and sum to less than or equal to one");
-		}
+		Preconditions.checkArgument(A >= 0.0f && B >= 0.0f && C >= 0.0f && A + B + C <= 1.0f,
+			"RMat parameters A, B, and C must be non-negative and sum to less than or equal to one");
 
 		this.A = A;
 		this.B = B;
@@ -128,9 +130,8 @@ extends AbstractGraphGenerator<LongValue, NullValue, NullValue> {
 	 * @return this
 	 */
 	public RMatGraph<T> setNoise(boolean noiseEnabled, float noise) {
-		if (noise < 0.0f || noise > 2.0f) {
-			throw new RuntimeException("RMat parameter noise must be non-negative and less than or equal to 2.0");
-		}
+		Preconditions.checkArgument(noise >= 0.0f && noise <= 2.0f,
+			"RMat parameter noise must be non-negative and less than or equal to 2.0");
 
 		this.noiseEnabled = noiseEnabled;
 		this.noise = noise;
@@ -139,7 +140,7 @@ extends AbstractGraphGenerator<LongValue, NullValue, NullValue> {
 	}
 
 	@Override
-	public Graph<LongValue,NullValue,NullValue> generate() {
+	public Graph<LongValue, NullValue, NullValue> generate() {
 		int scale = Long.SIZE - Long.numberOfLeadingZeros(vertexCount - 1);
 
 		// Edges
@@ -148,7 +149,7 @@ extends AbstractGraphGenerator<LongValue, NullValue, NullValue> {
 		List<BlockInfo<T>> generatorBlocks = randomGenerableFactory
 			.getRandomGenerables(edgeCount, cyclesPerEdge);
 
-		DataSet<Edge<LongValue,NullValue>> edges = env
+		DataSet<Edge<LongValue, NullValue>> edges = env
 			.fromCollection(generatorBlocks)
 				.name("Random generators")
 			.rebalance()
@@ -159,14 +160,14 @@ extends AbstractGraphGenerator<LongValue, NullValue, NullValue> {
 				.name("RMat graph edges");
 
 		// Vertices
-		DataSet<Vertex<LongValue,NullValue>> vertices = GraphGeneratorUtils.vertexSet(edges, parallelism);
+		DataSet<Vertex<LongValue, NullValue>> vertices = GraphGeneratorUtils.vertexSet(edges, parallelism);
 
 		// Graph
 		return Graph.fromDataSet(vertices, edges, env);
 	}
 
 	private static final class GenerateEdges<T extends RandomGenerator>
-	implements FlatMapFunction<BlockInfo<T>, Edge<LongValue,NullValue>> {
+	implements FlatMapFunction<BlockInfo<T>, Edge<LongValue, NullValue>> {
 
 		// Configuration
 		private final long vertexCount;
@@ -190,9 +191,9 @@ extends AbstractGraphGenerator<LongValue, NullValue, NullValue> {
 
 		private LongValue target = new LongValue();
 
-		private Edge<LongValue,NullValue> sourceToTarget = new Edge<>(source, target, NullValue.getInstance());
+		private Edge<LongValue, NullValue> sourceToTarget = new Edge<>(source, target, NullValue.getInstance());
 
-		private Edge<LongValue,NullValue> targetToSource = new Edge<>(target, source, NullValue.getInstance());
+		private Edge<LongValue, NullValue> targetToSource = new Edge<>(target, source, NullValue.getInstance());
 
 		public GenerateEdges(long vertexCount, int scale, float A, float B, float C, boolean noiseEnabled, float noise) {
 			this.vertexCount = vertexCount;
@@ -206,7 +207,7 @@ extends AbstractGraphGenerator<LongValue, NullValue, NullValue> {
 		}
 
 		@Override
-		public void flatMap(BlockInfo<T> blockInfo, Collector<Edge<LongValue,NullValue>> out)
+		public void flatMap(BlockInfo<T> blockInfo, Collector<Edge<LongValue, NullValue>> out)
 				throws Exception {
 			RandomGenerator rng = blockInfo.getRandomGenerable().generator();
 			long edgesToGenerate = blockInfo.getElementCount();

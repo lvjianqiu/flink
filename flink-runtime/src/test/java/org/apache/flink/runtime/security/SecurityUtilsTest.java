@@ -18,61 +18,64 @@
 package org.apache.flink.runtime.security;
 
 import org.apache.flink.configuration.Configuration;
-import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.flink.runtime.security.modules.SecurityModule;
+import org.junit.AfterClass;
 import org.junit.Test;
 
-import java.lang.reflect.Method;
+import java.util.Collections;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.fail;
+import static org.junit.Assert.*;
 
 /**
  * Tests for the {@link SecurityUtils}.
  */
 public class SecurityUtilsTest {
 
-	@Test
-	public void testCreateInsecureHadoopCtx() {
-		SecurityUtils.SecurityConfiguration sc = new SecurityUtils.SecurityConfiguration(new Configuration());
-		try {
-			SecurityUtils.install(sc);
-			assertEquals(UserGroupInformation.getLoginUser().getUserName(), getOSUserName());
-		} catch (Exception e) {
-			fail(e.getMessage());
+	static class TestSecurityModule implements SecurityModule {
+		boolean installed;
+
+		@Override
+		public void install(SecurityUtils.SecurityConfiguration configuration) throws SecurityInstallException {
+			installed = true;
+		}
+
+		@Override
+		public void uninstall() throws SecurityInstallException {
+			installed = false;
 		}
 	}
 
-	@Test
-	public void testInvalidUGIContext() {
-		try {
-			new HadoopSecurityContext(null);
-		} catch (RuntimeException re) {
-			assertEquals("UGI passed cannot be null",re.getMessage());
-		}
+	@AfterClass
+	public static void afterClass() {
+		SecurityUtils.uninstall();
 	}
 
+	@Test
+	public void testModuleInstall() throws Exception {
+		SecurityUtils.SecurityConfiguration sc = new SecurityUtils.SecurityConfiguration(
+			new Configuration(), new org.apache.hadoop.conf.Configuration(),
+			Collections.singletonList(TestSecurityModule.class));
 
-	private String getOSUserName() throws Exception {
-		String userName = "";
-		String osName = System.getProperty( "os.name" ).toLowerCase();
-		String className = null;
+		SecurityUtils.install(sc);
+		assertEquals(1, SecurityUtils.getInstalledModules().size());
+		TestSecurityModule testModule = (TestSecurityModule) SecurityUtils.getInstalledModules().get(0);
+		assertTrue(testModule.installed);
 
-		if( osName.contains( "windows" ) ){
-			className = "com.sun.security.auth.module.NTSystem";
-		}
-		else if( osName.contains( "linux" ) || osName.contains( "mac" )  ){
-			className = "com.sun.security.auth.module.UnixSystem";
-		}
-		else if( osName.contains( "solaris" ) || osName.contains( "sunos" ) ){
-			className = "com.sun.security.auth.module.SolarisSystem";
-		}
+		SecurityUtils.uninstall();
+		assertNull(SecurityUtils.getInstalledModules());
+		assertFalse(testModule.installed);
+	}
 
-		if( className != null ){
-			Class<?> c = Class.forName( className );
-			Method method = c.getDeclaredMethod( "getUsername" );
-			Object o = c.newInstance();
-			userName = (String) method.invoke( o );
-		}
-		return userName;
+	@Test
+	public void testSecurityContext() throws Exception {
+		SecurityUtils.SecurityConfiguration sc = new SecurityUtils.SecurityConfiguration(
+			new Configuration(), new org.apache.hadoop.conf.Configuration(),
+			Collections.singletonList(TestSecurityModule.class));
+
+		SecurityUtils.install(sc);
+		assertEquals(HadoopSecurityContext.class, SecurityUtils.getInstalledContext().getClass());
+
+		SecurityUtils.uninstall();
+		assertEquals(NoOpSecurityContext.class, SecurityUtils.getInstalledContext().getClass());
 	}
 }

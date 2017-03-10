@@ -24,6 +24,7 @@ import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.core.memory.DataOutputViewStreamWrapper;
 import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
 import org.apache.flink.runtime.state.KeyedStateBackend;
+import org.apache.flink.runtime.state.internal.InternalListState;
 import org.apache.flink.util.Preconditions;
 
 import java.io.ByteArrayOutputStream;
@@ -33,14 +34,14 @@ import java.util.Map;
 /**
  * Heap-backed partitioned {@link org.apache.flink.api.common.state.ListState} that is snapshotted
  * into files.
- * 
+ *
  * @param <K> The type of the key.
  * @param <N> The type of the namespace.
  * @param <V> The type of the value.
  */
 public class HeapListState<K, N, V>
-		extends AbstractHeapState<K, N, ArrayList<V>, ListState<V>, ListStateDescriptor<V>>
-		implements ListState<V> {
+		extends AbstractHeapMergingState<K, N, V, Iterable<V>, ArrayList<V>, ListState<V>, ListStateDescriptor<V>>
+		implements InternalListState<N, V> {
 
 	/**
 	 * Creates a new key/value state for the given hash map of key/value pairs.
@@ -58,6 +59,10 @@ public class HeapListState<K, N, V>
 			TypeSerializer<N> namespaceSerializer) {
 		super(backend, stateDesc, stateTable, keySerializer, namespaceSerializer);
 	}
+
+	// ------------------------------------------------------------------------
+	//  state access
+	// ------------------------------------------------------------------------
 
 	@Override
 	public Iterable<V> get() {
@@ -113,7 +118,7 @@ public class HeapListState<K, N, V>
 		}
 		list.add(value);
 	}
-	
+
 	@Override
 	public byte[] getSerializedValue(K key, N namespace) throws Exception {
 		Preconditions.checkState(namespace != null, "No namespace given.");
@@ -138,7 +143,7 @@ public class HeapListState<K, N, V>
 			return null;
 		}
 
-		TypeSerializer<V> serializer = stateDesc.getSerializer();
+		TypeSerializer<V> serializer = stateDesc.getElementSerializer();
 
 		ByteArrayOutputStream baos = new ByteArrayOutputStream();
 		DataOutputViewStreamWrapper view = new DataOutputViewStreamWrapper(baos);
@@ -153,5 +158,15 @@ public class HeapListState<K, N, V>
 		view.flush();
 
 		return baos.toByteArray();
+	}
+
+	// ------------------------------------------------------------------------
+	//  state merging
+	// ------------------------------------------------------------------------
+
+	@Override
+	protected ArrayList<V> mergeState(ArrayList<V> a, ArrayList<V> b) {
+		a.addAll(b);
+		return a;
 	}
 }

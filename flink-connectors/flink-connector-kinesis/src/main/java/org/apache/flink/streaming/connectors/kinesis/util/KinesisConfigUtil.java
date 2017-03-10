@@ -26,6 +26,8 @@ import org.apache.flink.streaming.connectors.kinesis.config.ConsumerConfigConsta
 import org.apache.flink.streaming.connectors.kinesis.config.ConsumerConfigConstants.InitialPosition;
 import org.apache.flink.streaming.connectors.kinesis.config.ProducerConfigConstants;
 
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
 import java.util.Properties;
 
 import static org.apache.flink.util.Preconditions.checkArgument;
@@ -35,6 +37,7 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
  * Utilities for Flink Kinesis connector configuration.
  */
 public class KinesisConfigUtil {
+	public static SimpleDateFormat initTimestampDateFormat = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSXXX");
 
 	/**
 	 * Validate configuration properties for {@link FlinkKinesisConsumer}.
@@ -47,7 +50,7 @@ public class KinesisConfigUtil {
 		if (config.containsKey(ConsumerConfigConstants.STREAM_INITIAL_POSITION)) {
 			String initPosType = config.getProperty(ConsumerConfigConstants.STREAM_INITIAL_POSITION);
 
-			// specified initial position in stream must be either LATEST or TRIM_HORIZON
+			// specified initial position in stream must be either LATEST, TRIM_HORIZON or AT_TIMESTAMP
 			try {
 				InitialPosition.valueOf(initPosType);
 			} catch (IllegalArgumentException e) {
@@ -56,6 +59,17 @@ public class KinesisConfigUtil {
 					sb.append(pos.toString()).append(", ");
 				}
 				throw new IllegalArgumentException("Invalid initial position in stream set in config. Valid values are: " + sb.toString());
+			}
+
+			// specified initial timestamp in stream when using AT_TIMESTAMP
+			if (InitialPosition.valueOf(initPosType) == InitialPosition.AT_TIMESTAMP) {
+				if (!config.containsKey(ConsumerConfigConstants.STREAM_INITIAL_TIMESTAMP)) {
+					throw new IllegalArgumentException("Please set value for initial timestamp ('"
+						+ ConsumerConfigConstants.STREAM_INITIAL_TIMESTAMP + "') when using AT_TIMESTAMP initial position.");
+				}
+				validateOptionalDateProperty(config, ConsumerConfigConstants.STREAM_INITIAL_TIMESTAMP,
+					"Invalid value given for initial timestamp for AT_TIMESTAMP initial position in stream. "
+						+ "Must be a valid format: yyyy-MM-dd'T'HH:mm:ss.SSSXXX or non-negative double value. For example, 2016-04-04T19:58:46.480-00:00 or 1459799926.480 .");
 			}
 		}
 
@@ -130,15 +144,7 @@ public class KinesisConfigUtil {
 	 * Validate configuration properties related to Amazon AWS service
 	 */
 	public static void validateAwsConfiguration(Properties config) {
-		if (!config.containsKey(AWSConfigConstants.AWS_CREDENTIALS_PROVIDER)) {
-			// if the credential provider type is not specified, it will default to BASIC later on,
-			// so the Access Key ID and Secret Key must be given
-			if (!config.containsKey(AWSConfigConstants.AWS_ACCESS_KEY_ID)
-				|| !config.containsKey(AWSConfigConstants.AWS_SECRET_ACCESS_KEY)) {
-				throw new IllegalArgumentException("Please set values for AWS Access Key ID ('"+ AWSConfigConstants.AWS_ACCESS_KEY_ID +"') " +
-					"and Secret Key ('" + AWSConfigConstants.AWS_SECRET_ACCESS_KEY + "') when using the BASIC AWS credential provider type.");
-			}
-		} else {
+		if (config.containsKey(AWSConfigConstants.AWS_CREDENTIALS_PROVIDER)) {
 			String credentialsProviderType = config.getProperty(AWSConfigConstants.AWS_CREDENTIALS_PROVIDER);
 
 			// value specified for AWSConfigConstants.AWS_CREDENTIALS_PROVIDER needs to be recognizable
@@ -157,7 +163,7 @@ public class KinesisConfigUtil {
 			if (providerType == CredentialProvider.BASIC) {
 				if (!config.containsKey(AWSConfigConstants.AWS_ACCESS_KEY_ID)
 					|| !config.containsKey(AWSConfigConstants.AWS_SECRET_ACCESS_KEY)) {
-					throw new IllegalArgumentException("Please set values for AWS Access Key ID ('"+ AWSConfigConstants.AWS_ACCESS_KEY_ID +"') " +
+					throw new IllegalArgumentException("Please set values for AWS Access Key ID ('" + AWSConfigConstants.AWS_ACCESS_KEY_ID + "') " +
 						"and Secret Key ('" + AWSConfigConstants.AWS_SECRET_ACCESS_KEY + "') when using the BASIC AWS credential provider type.");
 				}
 			}
@@ -211,6 +217,20 @@ public class KinesisConfigUtil {
 					throw new NumberFormatException();
 				}
 			} catch (NumberFormatException e) {
+				throw new IllegalArgumentException(message);
+			}
+		}
+	}
+
+	private static void validateOptionalDateProperty(Properties config, String key, String message) {
+		if (config.containsKey(key)) {
+			try {
+				initTimestampDateFormat.parse(config.getProperty(key));
+				double value = Double.parseDouble(config.getProperty(key));
+				if (value < 0) {
+					throw new NumberFormatException();
+				}
+			} catch (ParseException | NumberFormatException e) {
 				throw new IllegalArgumentException(message);
 			}
 		}

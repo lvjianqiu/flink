@@ -21,6 +21,9 @@ package org.apache.flink.configuration;
 import org.apache.flink.annotation.Public;
 import org.apache.flink.annotation.PublicEvolving;
 
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+
 import static org.apache.flink.configuration.ConfigOptions.key;
 
 /**
@@ -423,6 +426,12 @@ public final class ConfigConstants {
 	 */
 	@Deprecated
 	public static final String YARN_TASK_MANAGER_ENV_PREFIX = "yarn.taskmanager.env.";
+
+	/**
+	 * Template for the YARN container start incovation.
+	 */
+	public static final String YARN_CONTAINER_START_COMMAND_TEMPLATE =
+		"yarn.container-start-command-template";
 	
 	 /**
 	 * The config parameter defining the Akka actor system port for the ApplicationMaster and
@@ -435,6 +444,11 @@ public final class ConfigConstants {
 	 * Setting the port to 0 will let the OS choose an available port.
 	 */
 	public static final String YARN_APPLICATION_MASTER_PORT = "yarn.application-master.port";
+
+	/**
+	 * A comma-separated list of strings to use as YARN application tags.
+	 */
+	public static final String YARN_APPLICATION_TAGS = "yarn.tags";
 
 
 	// ------------------------ Mesos Configuration ------------------------
@@ -492,39 +506,9 @@ public final class ConfigConstants {
 	public static final String MESOS_RESOURCEMANAGER_FRAMEWORK_USER = "mesos.resourcemanager.framework.user";
 
 	/**
-	 * The cpus to acquire from Mesos.
-	 *
-	 * By default, we use the number of requested task slots.
-	 */
-	public static final String MESOS_RESOURCEMANAGER_TASKS_CPUS = "mesos.resourcemanager.tasks.cpus";
-
-	/**
-	 * The container image to use for task managers.
-	 */
-	public static final String MESOS_RESOURCEMANAGER_TASKS_CONTAINER_IMAGE_NAME =
-		"mesos.resourcemanager.tasks.container.image.name";
-
-	/**
 	 * Config parameter to override SSL support for the Artifact Server
 	 */
 	public static final String MESOS_ARTIFACT_SERVER_SSL_ENABLED = "mesos.resourcemanager.artifactserver.ssl.enabled";
-
-	/**
-	 * The type of container to use for task managers. Valid values are
-	 * {@code MESOS_RESOURCEMANAGER_TASKS_CONTAINER_TYPE_MESOS} or
-	 * {@code MESOS_RESOURCEMANAGER_TASKS_CONTAINER_TYPE_DOCKER}.
-	 */
-	public static final String MESOS_RESOURCEMANAGER_TASKS_CONTAINER_TYPE =
-		"mesos.resourcemanager.tasks.container.type";
-
-	/**
-	 * Value for {@code MESOS_RESOURCEMANAGER_TASKS_CONTAINER_TYPE} setting. Tells to use the Mesos containerizer.
-	 */
-	public static final String MESOS_RESOURCEMANAGER_TASKS_CONTAINER_TYPE_MESOS = "mesos";
-	/**
-	 * Value for {@code MESOS_RESOURCEMANAGER_TASKS_CONTAINER_TYPE} setting. Tells to use the Docker containerizer.
-	 */
-	public static final String MESOS_RESOURCEMANAGER_TASKS_CONTAINER_TYPE_DOCKER = "docker";
 
 	// ------------------------ Hadoop Configuration ------------------------
 
@@ -618,7 +602,12 @@ public final class ConfigConstants {
 	/** Config parameter indicating whether jobs can be uploaded and run from the web-frontend. */
 	public static final String JOB_MANAGER_WEB_SUBMIT_ENABLED_KEY = "jobmanager.web.submit.enable";
 
-	/** Flag to disable checkpoint stats. */
+	/**
+	 * Flag to disable checkpoint stats.
+	 *
+	 * @deprecated Not possible to disable any longer. Use history size of 0.
+	 */
+	@Deprecated
 	public static final String JOB_MANAGER_WEB_CHECKPOINTS_DISABLE = "jobmanager.web.checkpoints.disable";
 
 	/** Config parameter defining the number of checkpoints to remember for recent history. */
@@ -755,17 +744,29 @@ public final class ConfigConstants {
 	// ----------------------------- Streaming --------------------------------
 	
 	/**
-	 * State backend for checkpoints;
+	 * State backend for checkpoints
+	 * 
+	 * @deprecated Use {@link CoreOptions#STATE_BACKEND} instead.
 	 */
+	@Deprecated
 	public static final String STATE_BACKEND = "state.backend";
 	
 	// ----------------------------- Miscellaneous ----------------------------
 	
 	/**
-	 * The key to the Flink base directory path
+	 * The key to the Flink base directory path. Was initially used for configurations of the
+	 * web UI, but outdated now.
+	 * 
+	 * @deprecated This parameter should not be used any more. A running Flink cluster should
+	 *             make no assumption about its location.
 	 */
+	@Deprecated
 	public static final String FLINK_BASE_DIR_PATH_KEY = "flink.base.dir.path";
-	
+
+	/**
+	 * @deprecated Use {@link CoreOptions#FLINK_JVM_OPTIONS} instead.
+	 */
+	@Deprecated
 	public static final String FLINK_JVM_OPTIONS = "env.java.opts";
 
 	// --------------------------- High Availability --------------------------
@@ -834,7 +835,7 @@ public final class ConfigConstants {
 
 	/** ZooKeeper root path (ZNode) for Mesos workers. */
 	@PublicEvolving
-	public static final String HA_ZOOKEEPER_MESOS_WORKERS_PATH = "recovery.zookeeper.path.mesos-workers";
+	public static final String HA_ZOOKEEPER_MESOS_WORKERS_PATH = "high-availability.zookeeper.path.mesos-workers";
 
 	@PublicEvolving
 	public static final String HA_ZOOKEEPER_SESSION_TIMEOUT = "high-availability.zookeeper.client.session-timeout";
@@ -892,6 +893,10 @@ public final class ConfigConstants {
 	/** Deprecated in favour of {@link #HA_ZOOKEEPER_CHECKPOINT_COUNTER_PATH}. */
 	@Deprecated
 	public static final String ZOOKEEPER_CHECKPOINT_COUNTER_PATH = "recovery.zookeeper.path.checkpoint-counter";
+
+	/** Deprecated in favour of {@link #HA_ZOOKEEPER_MESOS_WORKERS_PATH}. */
+	@Deprecated
+	public static final String ZOOKEEPER_MESOS_WORKERS_PATH = "recovery.zookeeper.path.mesos-workers";
 
 	/** Deprecated in favour of {@link #HA_ZOOKEEPER_SESSION_TIMEOUT}. */
 	@Deprecated
@@ -1171,12 +1176,19 @@ public final class ConfigConstants {
 	public static final float DEFAULT_YARN_HEAP_CUTOFF_RATIO = 0.25f;
 
 	/**
+	 * Start command template for Flink on YARN containers
+	 */
+	public static final String DEFAULT_YARN_CONTAINER_START_COMMAND_TEMPLATE =
+		"%java% %jvmmem% %jvmopts% %logging% %class% %args% %redirects%";
+
+	/**
 	 * Default port for the application master is 0, which means
 	 * the operating system assigns an ephemeral port
 	 */
 	public static final String DEFAULT_YARN_JOB_MANAGER_PORT = "0";
 
 	// ------ Mesos-Specific Configuration ------
+	// For more configuration entries please see {@code MesosTaskManagerParameters}.
 
 	/** The default failover timeout provided to Mesos (10 mins) */
 	public static final int DEFAULT_MESOS_FAILOVER_TIMEOUT_SECS = 10 * 60;
@@ -1197,8 +1209,6 @@ public final class ConfigConstants {
 
 	/** Default value to override SSL support for the Artifact Server */
 	public static final boolean DEFAULT_MESOS_ARTIFACT_SERVER_SSL_ENABLED = true;
-
-	public static final String DEFAULT_MESOS_RESOURCEMANAGER_TASKS_CONTAINER_IMAGE_TYPE = "mesos";
 
 	// ------------------------ File System Behavior ------------------------
 
@@ -1257,7 +1267,8 @@ public final class ConfigConstants {
 	/** By default, submitting jobs from the web-frontend is allowed. */
 	public static final boolean DEFAULT_JOB_MANAGER_WEB_SUBMIT_ENABLED = true;
 
-	/** Default flag to disable checkpoint stats. */
+	/** Config key has been deprecated. Therefore, no default value required. */
+	@Deprecated
 	public static final boolean DEFAULT_JOB_MANAGER_WEB_CHECKPOINTS_DISABLE = false;
 
 	/** Default number of checkpoints to remember for recent history. */
@@ -1420,19 +1431,9 @@ public final class ConfigConstants {
 	/** The environment variable name which contains the Flink installation root directory */
 	public static final String ENV_FLINK_HOME_DIR = "FLINK_HOME";
 
-	// -------------------------------- Security -------------------------------
+	// ---------------------------- Encoding ------------------------------
 
-	/**
-	 * The config parameter defining security credentials required
-	 * for securing Flink cluster.
-	 */
-
-	/** Keytab file key name to be used in flink configuration file */
-	public static final String SECURITY_KEYTAB_KEY = "security.keytab";
-
-	/** Kerberos security principal key name to be used in flink configuration file */
-	public static final String SECURITY_PRINCIPAL_KEY = "security.principal";
-
+	public static final Charset DEFAULT_CHARSET = StandardCharsets.UTF_8;
 
 	/**
 	 * Not instantiable.

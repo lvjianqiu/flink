@@ -44,6 +44,7 @@ public class TestProcessingTimeServiceTest {
 
 		final OneInputStreamTaskTestHarness<String, String> testHarness = new OneInputStreamTaskTestHarness<>(
 			mapTask, BasicTypeInfo.STRING_TYPE_INFO, BasicTypeInfo.STRING_TYPE_INFO);
+		testHarness.setupOutputForSingletonOperatorChain();
 
 		StreamConfig streamConfig = testHarness.getStreamConfig();
 
@@ -52,7 +53,7 @@ public class TestProcessingTimeServiceTest {
 
 		testHarness.invoke();
 
-		assertEquals(testHarness.getProcessingTimeService().getCurrentProcessingTime(), 0);
+		assertEquals(Long.MIN_VALUE, testHarness.getProcessingTimeService().getCurrentProcessingTime());
 
 		tp.setCurrentTime(11);
 		assertEquals(testHarness.getProcessingTimeService().getCurrentProcessingTime(), 11);
@@ -76,13 +77,13 @@ public class TestProcessingTimeServiceTest {
 			}
 		});
 
-		assertEquals(2, tp.getNumRegisteredTimers());
+		assertEquals(2, tp.getNumActiveTimers());
 
 		tp.setCurrentTime(35);
-		assertEquals(1, tp.getNumRegisteredTimers());
+		assertEquals(1, tp.getNumActiveTimers());
 
 		tp.setCurrentTime(40);
-		assertEquals(0, tp.getNumRegisteredTimers());
+		assertEquals(0, tp.getNumActiveTimers());
 
 		tp.shutdownService();
 	}

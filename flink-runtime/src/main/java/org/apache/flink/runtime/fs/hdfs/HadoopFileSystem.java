@@ -35,6 +35,8 @@ import java.lang.reflect.Method;
 import java.net.URI;
 import java.net.UnknownHostException;
 
+import static org.apache.flink.util.Preconditions.checkNotNull;
+
 /**
  * Concrete implementation of the {@link FileSystem} base class for the Hadoop File System. The
  * class is a wrapper class which encapsulated the original Hadoop HDFS API.
@@ -60,7 +62,8 @@ public final class HadoopFileSystem extends FileSystem implements HadoopFileSyst
 
 
 	/**
-	 * Creates a new DistributedFileSystem object to access HDFS
+	 * Creates a new DistributedFileSystem object to access HDFS, based on a class name
+	 * and picking up the configuration from the class path or the Flink configuration.
 	 * 
 	 * @throws IOException
 	 *         throw if the required HDFS classes cannot be instantiated
@@ -74,6 +77,21 @@ public final class HadoopFileSystem extends FileSystem implements HadoopFileSyst
 		}
 
 		this.fs = instantiateFileSystem(fsClass);
+	}
+
+	/**
+	 * Creates a new DistributedFileSystem that uses the given Hadoop
+	 * {@link org.apache.hadoop.fs.FileSystem} under the hood.
+	 *
+	 * @param hadoopConfig The Hadoop configuration that the FileSystem is based on.
+	 * @param hadoopFileSystem The Hadoop FileSystem that will be used under the hood.
+	 */
+	public HadoopFileSystem(
+			org.apache.hadoop.conf.Configuration hadoopConfig,
+			org.apache.hadoop.fs.FileSystem hadoopFileSystem) {
+
+		this.conf = checkNotNull(hadoopConfig, "hadoopConfig");
+		this.fs = checkNotNull(hadoopFileSystem, "hadoopFileSystem");
 	}
 
 	private Class<? extends org.apache.hadoop.fs.FileSystem> getDefaultHDFSClass() throws IOException {
@@ -399,9 +417,9 @@ public final class HadoopFileSystem extends FileSystem implements HadoopFileSyst
 
 
 	@Override
-	public HadoopDataOutputStream create(final Path f, final boolean overwrite) throws IOException {
+	public HadoopDataOutputStream create(final Path f, final WriteMode overwrite) throws IOException {
 		final org.apache.hadoop.fs.FSDataOutputStream fsDataOutputStream = this.fs
-			.create(new org.apache.hadoop.fs.Path(f.toString()), overwrite);
+			.create(new org.apache.hadoop.fs.Path(f.toString()), overwrite == WriteMode.OVERWRITE);
 		return new HadoopDataOutputStream(fsDataOutputStream);
 	}
 
